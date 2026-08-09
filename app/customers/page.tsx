@@ -32,6 +32,10 @@ interface CustomerSale {
   product_name: string;
   quantity_sold: number;
   sale_type: "meter" | "roll";
+  // True meter-equivalent deducted from stock for this sale, regardless of
+  // whether it was sold by the meter or by the roll. This is what "how many
+  // meters did this customer buy" should read from, not quantity_sold.
+  stock_quantity_deducted: number | null;
   actual_total_price: number;
   created_at: string;
 }
@@ -39,11 +43,13 @@ interface CustomerSale {
 interface SaleAggregateRow {
   customer_id: string | null;
   actual_total_price: number;
+  stock_quantity_deducted: number | null;
   created_at: string;
 }
 
 interface CustomerStats {
   totalSpent: number;
+  totalMeters: number;
   purchaseCount: number;
   lastPurchaseAt: string;
 }
@@ -58,6 +64,9 @@ const emptyCustomer = {
 
 const formatIqd = (amount: number) =>
   `${Number(amount || 0).toLocaleString("en-IQ")} د.ع`;
+
+const formatMeters = (amount: number) =>
+  `${Number(amount || 0).toLocaleString("en-IQ")} متر`;
 
 async function getCustomers(): Promise<Customer[]> {
   const { data, error } = await supabase
@@ -75,7 +84,9 @@ async function getCustomers(): Promise<Customer[]> {
 async function getCustomerSalesAggregates(): Promise<SaleAggregateRow[]> {
   const { data, error } = await supabase
     .from("sales")
-    .select("customer_id, actual_total_price, created_at")
+    .select(
+      "customer_id, actual_total_price, stock_quantity_deducted, created_at"
+    )
     .not("customer_id", "is", null);
 
   if (error) throw error;
@@ -170,9 +181,11 @@ export default function CustomersPage() {
       if (!row.customer_id) continue;
 
       const existing = map.get(row.customer_id);
+      const meters = Number(row.stock_quantity_deducted || 0);
 
       if (existing) {
         existing.totalSpent += Number(row.actual_total_price || 0);
+        existing.totalMeters += meters;
         existing.purchaseCount += 1;
         if (new Date(row.created_at) > new Date(existing.lastPurchaseAt)) {
           existing.lastPurchaseAt = row.created_at;
@@ -180,6 +193,7 @@ export default function CustomersPage() {
       } else {
         map.set(row.customer_id, {
           totalSpent: Number(row.actual_total_price || 0),
+          totalMeters: meters,
           purchaseCount: 1,
           lastPurchaseAt: row.created_at,
         });
@@ -196,6 +210,7 @@ export default function CustomersPage() {
           customer,
           stats: customerStatsMap.get(customer.id) ?? {
             totalSpent: 0,
+            totalMeters: 0,
             purchaseCount: 0,
             lastPurchaseAt: "",
           },
@@ -244,6 +259,14 @@ export default function CustomersPage() {
     let total = 0;
     customerStatsMap.forEach((stats) => {
       total += stats.totalSpent;
+    });
+    return total;
+  }, [customerStatsMap]);
+
+  const totalMetersFromCustomers = useMemo(() => {
+    let total = 0;
+    customerStatsMap.forEach((stats) => {
+      total += stats.totalMeters;
     });
     return total;
   }, [customerStatsMap]);
@@ -395,7 +418,7 @@ export default function CustomersPage() {
     const { data, error } = await supabase
       .from("sales")
       .select(
-        "id, invoice_number, product_name, quantity_sold, sale_type, actual_total_price, created_at"
+        "id, invoice_number, product_name, quantity_sold, sale_type, stock_quantity_deducted, actual_total_price, created_at"
       )
       .eq("customer_id", customer.id)
       .order("created_at", { ascending: false });
@@ -412,6 +435,11 @@ export default function CustomersPage() {
 
   const totalPurchases = customerSales.reduce(
     (total, sale) => total + Number(sale.actual_total_price || 0),
+    0
+  );
+
+  const totalPurchasedMeters = customerSales.reduce(
+    (total, sale) => total + Number(sale.stock_quantity_deducted || 0),
     0
   );
 
@@ -551,6 +579,11 @@ export default function CustomersPage() {
                   <span className="text-[#C9A227] font-bold">
                     {formatIqd(totalRevenueFromCustomers)}
                   </span>
+                  {" · "}
+                  إجمالي الأمتار المباعة لهم:{" "}
+                  <span className="text-[#C9A227] font-bold">
+                    {formatMeters(totalMetersFromCustomers)}
+                  </span>
                 </p>
               )}
             </div>
@@ -597,6 +630,8 @@ export default function CustomersPage() {
                         </span>
                         <span className="text-sm font-mono text-[#C9A227] shrink-0">
                           {formatIqd(entry.stats.totalSpent)}
+                          <span className="text-[#665D4E] mx-1">·</span>
+                          {formatMeters(entry.stats.totalMeters)}
                         </span>
                       </div>
 
@@ -652,6 +687,7 @@ export default function CustomersPage() {
                   <th className="py-4 px-5 font-normal">رقم الموبايل</th>
                   <th className="py-4 px-5 font-normal">الموقع</th>
                   <th className="py-4 px-5 font-normal">إجمالي المشتريات</th>
+                  <th className="py-4 px-5 font-normal">الأمتار المشتراة</th>
                   <th className="py-4 px-5 font-normal text-center">الإجراء</th>
                 </tr>
               </thead>
@@ -660,7 +696,7 @@ export default function CustomersPage() {
                 {loading ? (
                   <tr>
                     <td
-                      colSpan={6}
+                      colSpan={7}
                       className="py-12 text-center text-[#C9A227]"
                     >
                       جاري تحميل الزبائن...
@@ -702,6 +738,9 @@ export default function CustomersPage() {
                         <td className="py-4 px-5 text-[#B3A990] font-mono">
                           {stats ? formatIqd(stats.totalSpent) : "-"}
                         </td>
+                        <td className="py-4 px-5 text-[#B3A990] font-mono">
+                          {stats ? formatMeters(stats.totalMeters) : "-"}
+                        </td>
                         <td className="py-4 px-5">
                           <div className="flex justify-center items-center gap-2">
                             <button
@@ -739,7 +778,7 @@ export default function CustomersPage() {
                 ) : (
                   <tr>
                     <td
-                      colSpan={6}
+                      colSpan={7}
                       className="py-12 text-center text-[#665D4E]"
                     >
                       لا يوجد زبائن مطابقون.
@@ -979,6 +1018,11 @@ export default function CustomersPage() {
                 <span className="text-[#C9A227] font-bold">
                   {formatIqd(totalPurchases)}
                 </span>
+                {" · "}
+                إجمالي الأمتار:{" "}
+                <span className="text-[#C9A227] font-bold">
+                  {formatMeters(totalPurchasedMeters)}
+                </span>
               </p>
 
               <div className="overflow-y-auto">
@@ -989,6 +1033,7 @@ export default function CustomersPage() {
                       <th className="py-3 px-3 font-normal">رقم الفاتورة</th>
                       <th className="py-3 px-3 font-normal">القماش</th>
                       <th className="py-3 px-3 font-normal">الكمية</th>
+                      <th className="py-3 px-3 font-normal">الأمتار</th>
                       <th className="py-3 px-3 font-normal">المبلغ</th>
                     </tr>
                   </thead>
@@ -997,7 +1042,7 @@ export default function CustomersPage() {
                     {historyLoading ? (
                       <tr>
                         <td
-                          colSpan={5}
+                          colSpan={6}
                           className="py-10 text-center text-[#C9A227]"
                         >
                           جاري تحميل السجل...
@@ -1022,6 +1067,11 @@ export default function CustomersPage() {
                             {sale.quantity_sold}{" "}
                             {sale.sale_type === "meter" ? "متر" : "بكرة"}
                           </td>
+                          <td className="py-3 px-3 text-[#B3A990] font-mono">
+                            {sale.stock_quantity_deducted != null
+                              ? formatMeters(sale.stock_quantity_deducted)
+                              : "-"}
+                          </td>
                           <td className="py-3 px-3 text-[#C9A227] font-mono">
                             {formatIqd(sale.actual_total_price)}
                           </td>
@@ -1030,7 +1080,7 @@ export default function CustomersPage() {
                     ) : (
                       <tr>
                         <td
-                          colSpan={5}
+                          colSpan={6}
                           className="py-10 text-center text-[#665D4E]"
                         >
                           لا توجد مشتريات مسجلة لهذا الزبون.

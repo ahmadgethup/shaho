@@ -459,22 +459,6 @@ export default function Inventory() {
               <form onSubmit={handleSubmit} className="flex flex-col gap-4">
                 <div>
                   <label className="block text-[#8C8272] text-sm mb-2">
-                    اسم القماش
-                  </label>
-                  <input
-                    required
-                    type="text"
-                    value={formData.name}
-                    onChange={(e) =>
-                      setFormData({ ...formData, name: e.target.value })
-                    }
-                    className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
-                    placeholder="مثال: مخمل تركي"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[#8C8272] text-sm mb-2">
                     التصنيف
                   </label>
                   <input
@@ -494,6 +478,21 @@ export default function Inventory() {
                       <option key={category} value={category} />
                     ))}
                   </datalist>
+                </div>
+                <div>
+                  <label className="block text-[#8C8272] text-sm mb-2">
+                    اسم القماش
+                  </label>
+                  <input
+                    required
+                    type="text"
+                    value={formData.name}
+                    onChange={(e) =>
+                      setFormData({ ...formData, name: e.target.value })
+                    }
+                    className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
+                    placeholder="مثال: مخمل تركي"
+                  />
                 </div>
 
                 <div>

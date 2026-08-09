@@ -35,6 +35,17 @@ interface Payment {
   created_at: string;
 }
 
+// A credit sale that was charged to this loan from the Sales screen. Only
+// the fields the history modal needs.
+interface LoanSale {
+  id: number;
+  product_name: string;
+  quantity_sold: number;
+  sale_type: "meter" | "roll";
+  actual_total_price: number;
+  created_at: string;
+}
+
 interface LoanWithDetails extends Loan {
   paid_amount: number;
   remaining_amount: number;
@@ -130,6 +141,22 @@ async function getLoansData(): Promise<{
   };
 }
 
+// Credit sales charged to one specific loan (product, amount, date), used
+// to build the "متبقٍ عليه" ledger in the history modal.
+async function getLoanSalesHistory(loanId: number): Promise<LoanSale[]> {
+  const { data, error } = await supabase
+    .from("sales")
+    .select(
+      "id, product_name, quantity_sold, sale_type, actual_total_price, created_at"
+    )
+    .eq("loan_id", loanId)
+    .order("created_at", { ascending: false });
+
+  if (error) throw error;
+
+  return (data ?? []) as LoanSale[];
+}
+
 export default function Loans() {
   const router = useRouter();
 
@@ -145,6 +172,8 @@ export default function Loans() {
     useState<LoanWithDetails | null>(null);
   const [historyModalData, setHistoryModalData] =
     useState<LoanWithDetails | null>(null);
+  const [historySales, setHistorySales] = useState<LoanSale[]>([]);
+  const [loadingHistorySales, setLoadingHistorySales] = useState(false);
 
   const [newLoan, setNewLoan] = useState(emptyLoan);
   const [paymentAmount, setPaymentAmount] = useState("");
@@ -271,6 +300,29 @@ export default function Loans() {
   const closePaymentModal = () => {
     setPaymentModalData(null);
     setPaymentAmount("");
+  };
+
+  // Loads the credit-sale ledger for this customer alongside the existing
+  // payment history, so the modal shows both what they bought on credit and
+  // what they've paid back.
+  const openHistoryModal = async (loan: LoanWithDetails) => {
+    setHistoryModalData(loan);
+    setHistorySales([]);
+    setLoadingHistorySales(true);
+
+    try {
+      const sales = await getLoanSalesHistory(loan.id);
+      setHistorySales(sales);
+    } catch (error: unknown) {
+      console.error("Error fetching loan sales history:", error);
+    } finally {
+      setLoadingHistorySales(false);
+    }
+  };
+
+  const closeHistoryModal = () => {
+    setHistoryModalData(null);
+    setHistorySales([]);
   };
 
   const handleAddLoan = async (event: React.FormEvent) => {
@@ -645,7 +697,7 @@ export default function Loans() {
                           )}
 
                           <button
-                            onClick={() => setHistoryModalData(loan)}
+                            onClick={() => void openHistoryModal(loan)}
                             className="bg-[#221B14] text-[#B3A990] hover:text-white border border-[#3A3128] hover:border-[#665D4E] px-3 py-1.5 rounded-sm text-sm transition-all flex items-center gap-1"
                           >
                             <HistoryIcon />
@@ -872,10 +924,10 @@ export default function Loans() {
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9 }}
-              className="bg-[#1C1611] border border-dashed border-[#C9A227]/40 rounded-sm p-6 w-full max-w-lg shadow-2xl relative max-h-[80vh] flex flex-col"
+              className="bg-[#1C1611] border border-dashed border-[#C9A227]/40 rounded-sm p-6 w-full max-w-lg shadow-2xl relative max-h-[85vh] flex flex-col"
             >
               <button
-                onClick={() => setHistoryModalData(null)}
+                onClick={closeHistoryModal}
                 className="absolute top-4 left-4 text-[#665D4E] hover:text-white transition-colors"
                 aria-label="إغلاق"
               >
@@ -885,7 +937,7 @@ export default function Loans() {
               <h2
                 className={`${arefRuqaa.className} text-xl font-bold text-[#C9A227] mb-2`}
               >
-                سجل الدفعات والتسديدات
+                سجل الحساب الكامل
               </h2>
 
               <p className="text-[#8C8272] mb-6 text-sm">
@@ -895,44 +947,100 @@ export default function Loans() {
                 </strong>
               </p>
 
-              <div className="overflow-y-auto pr-2">
-                {historyPayments.length > 0 ? (
-                  <div className="flex flex-col gap-3">
-                    {historyPayments.map((payment, index) => (
-                      <div
-                        key={payment.id}
-                        className="flex justify-between items-center bg-[#221B14] p-4 rounded-sm border border-dashed border-[#3A3128]"
-                      >
-                        <div>
-                          <div className="text-xs text-[#665D4E] mb-1">
-                            الدفعة #{historyPayments.length - index}
+              <div className="overflow-y-auto pr-2 flex flex-col gap-6">
+                <div>
+                  <h3 className="text-sm font-bold text-[#E08A78] mb-3">
+                    المشتريات المسجَّلة كدين
+                  </h3>
+
+                  {loadingHistorySales ? (
+                    <div className="text-center text-[#665D4E] py-6 text-sm">
+                      جاري التحميل...
+                    </div>
+                  ) : historySales.length > 0 ? (
+                    <div className="flex flex-col gap-3">
+                      {historySales.map((sale) => (
+                        <div
+                          key={sale.id}
+                          className="flex justify-between items-center bg-[#221B14] p-4 rounded-sm border border-dashed border-[#C1523F]/25"
+                        >
+                          <div>
+                            <div className="text-sm font-bold text-[#EDE6D6]">
+                              {sale.product_name}
+                            </div>
+
+                            <div className="text-xs text-[#8C8272] mt-1">
+                              {sale.quantity_sold}{" "}
+                              {sale.sale_type === "meter" ? "متر" : "بكرة"} ·{" "}
+                              {new Date(sale.created_at).toLocaleString(
+                                "ar-IQ",
+                                {
+                                  year: "numeric",
+                                  month: "2-digit",
+                                  day: "2-digit",
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                }
+                              )}
+                            </div>
                           </div>
 
-                          <div className="text-sm text-[#B3A990]">
-                            {new Date(payment.created_at).toLocaleString(
-                              "ar-IQ",
-                              {
-                                year: "numeric",
-                                month: "2-digit",
-                                day: "2-digit",
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              }
-                            )}
+                          <div className="text-[#E08A78] font-mono font-bold text-lg">
+                            +{formatIqd(sale.actual_total_price)}
                           </div>
                         </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center text-[#665D4E] py-6 text-sm">
+                      لا توجد مشتريات مسجَّلة كدين لهذا الحساب.
+                    </div>
+                  )}
+                </div>
 
-                        <div className="text-[#8FB08A] font-mono font-bold text-lg">
-                          +{formatIqd(payment.payment_amount)}
+                <div>
+                  <h3 className="text-sm font-bold text-[#8FB08A] mb-3">
+                    الدفعات والتسديدات
+                  </h3>
+
+                  {historyPayments.length > 0 ? (
+                    <div className="flex flex-col gap-3">
+                      {historyPayments.map((payment, index) => (
+                        <div
+                          key={payment.id}
+                          className="flex justify-between items-center bg-[#221B14] p-4 rounded-sm border border-dashed border-[#3A3128]"
+                        >
+                          <div>
+                            <div className="text-xs text-[#665D4E] mb-1">
+                              الدفعة #{historyPayments.length - index}
+                            </div>
+
+                            <div className="text-sm text-[#B3A990]">
+                              {new Date(payment.created_at).toLocaleString(
+                                "ar-IQ",
+                                {
+                                  year: "numeric",
+                                  month: "2-digit",
+                                  day: "2-digit",
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                }
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="text-[#8FB08A] font-mono font-bold text-lg">
+                            +{formatIqd(payment.payment_amount)}
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-center text-[#665D4E] py-10">
-                    لم يقم هذا العميل بتسديد أي دفعة بعد.
-                  </div>
-                )}
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center text-[#665D4E] py-6 text-sm">
+                      لم يقم هذا العميل بتسديد أي دفعة بعد.
+                    </div>
+                  )}
+                </div>
               </div>
             </motion.div>
           </Modal>

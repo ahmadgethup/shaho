@@ -27,6 +27,15 @@ interface Delivery {
   delivered_at: string;
 }
 
+interface CustomerPhoneRow {
+  id: string;
+  phone: string;
+}
+
+interface SaleCustomerRow {
+  customer_id: string | null;
+}
+
 // نفس ألوان "بكرات الخيط" المستخدمة بالصفحة الرئيسية، تدور على المندوبين بالترتيب
 const THREAD_COLORS = [
   "#C9A227",
@@ -37,10 +46,38 @@ const THREAD_COLORS = [
   "#A9854D",
 ];
 
+// نبقي فقط الأرقام، لتجاهل الفراغات والشرطات عند مقارنة أرقام الهاتف
+// بين جدول التسليمات وجدول الزبائن.
+const normalizePhone = (phone: string) => phone.replace(/\D/g, "");
+
+async function getCustomerPhones(): Promise<CustomerPhoneRow[]> {
+  const { data, error } = await supabase
+    .from("customers")
+    .select("id, phone")
+    .not("phone", "is", null);
+
+  if (error) throw error;
+  return (data ?? []) as CustomerPhoneRow[];
+}
+
+async function getSaleCustomerIds(): Promise<SaleCustomerRow[]> {
+  const { data, error } = await supabase
+    .from("sales")
+    .select("customer_id")
+    .not("customer_id", "is", null);
+
+  if (error) throw error;
+  return (data ?? []) as SaleCustomerRow[];
+}
+
 export default function DeliveriesPage() {
   const router = useRouter();
 
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
+  const [customerPhones, setCustomerPhones] = useState<CustomerPhoneRow[]>([]);
+  const [buyerCustomerIds, setBuyerCustomerIds] = useState<Set<string>>(
+    new Set()
+  );
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedRep, setSelectedRep] = useState<string>("");
@@ -49,23 +86,39 @@ export default function DeliveriesPage() {
   useEffect(() => {
     let isMounted = true;
 
-    supabase
-      .from("catalog_deliveries")
-      .select(
-        "id, rep_name, shop_name, owner_name, phone, location, notes, delivered_at"
-      )
-      .order("delivered_at", { ascending: false })
-      .then(({ data, error }) => {
+    Promise.all([
+      supabase
+        .from("catalog_deliveries")
+        .select(
+          "id, rep_name, shop_name, owner_name, phone, location, notes, delivered_at"
+        )
+        .order("delivered_at", { ascending: false }),
+      getCustomerPhones(),
+      getSaleCustomerIds(),
+    ])
+      .then(([deliveriesResult, customers, saleCustomerRows]) => {
         if (!isMounted) return;
 
-        if (error) {
-          console.error("Error loading deliveries:", error);
+        if (deliveriesResult.error) {
+          console.error("Error loading deliveries:", deliveriesResult.error);
           setLoading(false);
           return;
         }
 
-        setDeliveries(data ?? []);
+        setDeliveries(deliveriesResult.data ?? []);
+        setCustomerPhones(customers);
+        setBuyerCustomerIds(
+          new Set(
+            saleCustomerRows
+              .map((row) => row.customer_id)
+              .filter((id): id is string => !!id)
+          )
+        );
         setLoading(false);
+      })
+      .catch((error: unknown) => {
+        console.error("Error loading deliveries page data:", error);
+        if (isMounted) setLoading(false);
       });
 
     return () => {
@@ -102,6 +155,37 @@ export default function DeliveriesPage() {
     setDeletingId(null);
   };
 
+  // خريطة رقم الهاتف (بعد التطبيع) -> id الزبون، لمطابقة تسليمات الكتالوك
+  // بزبائن مسجَّلين اعتماداً على رقم الموبايل فقط.
+  const phoneToCustomerId = useMemo(() => {
+    const map = new Map<string, string>();
+
+    customerPhones.forEach((customer) => {
+      const normalized = normalizePhone(customer.phone || "");
+      if (normalized) map.set(normalized, customer.id);
+    });
+
+    return map;
+  }, [customerPhones]);
+
+  // هل هذا التسليم اشترى صاحبه فعلاً؟ null = رقم الهاتف غير موجود بسجل
+  // الزبائن أصلاً (نعامله كـ "لم يشترِ" حسب طلبك: مطابقة موجودة + شراء = إيجابي،
+  // أي شيء غير ذلك = سلبي).
+  const purchaseStatusByDeliveryId = useMemo(() => {
+    const map = new Map<string, boolean>();
+
+    deliveries.forEach((delivery) => {
+      const normalized = normalizePhone(delivery.phone || "");
+      const customerId = normalized
+        ? phoneToCustomerId.get(normalized)
+        : undefined;
+      const hasPurchased = !!customerId && buyerCustomerIds.has(customerId);
+      map.set(delivery.id, hasPurchased);
+    });
+
+    return map;
+  }, [deliveries, phoneToCustomerId, buyerCustomerIds]);
+
   // ترتيب المندوبين حسب عدد المحلات اللي وزعوا عليها
   const repLeaderboard = useMemo(() => {
     const counts = new Map<string, number>();
@@ -119,6 +203,11 @@ export default function DeliveriesPage() {
   const uniqueShops = useMemo(
     () => new Set(deliveries.map((d) => d.shop_name)).size,
     [deliveries]
+  );
+
+  const positiveCount = useMemo(
+    () => deliveries.filter((d) => purchaseStatusByDeliveryId.get(d.id)).length,
+    [deliveries, purchaseStatusByDeliveryId]
   );
 
   const filteredDeliveries = useMemo(() => {
@@ -178,7 +267,7 @@ export default function DeliveriesPage() {
         </div>
 
         {/* بطاقات ملخص سريعة */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
           <SummaryCard
             title="إجمالي التسليمات"
             value={deliveries.length.toString()}
@@ -190,6 +279,11 @@ export default function DeliveriesPage() {
           <SummaryCard
             title="عدد المندوبين النشطين"
             value={repLeaderboard.length.toString()}
+          />
+          <SummaryCard
+            title="اشترت فعلاً (حسب رقم الهاتف)"
+            value={loading ? "..." : positiveCount.toString()}
+            accent="#8FB08A"
           />
         </div>
 
@@ -283,6 +377,7 @@ export default function DeliveriesPage() {
                   <th className="py-4 px-5">صاحب المحل</th>
                   <th className="py-4 px-5">الهاتف</th>
                   <th className="py-4 px-5">الموقع</th>
+                  <th className="py-4 px-5 text-center">التقييم</th>
                   <th className="py-4 px-5 text-center">إجراء</th>
                 </tr>
               </thead>
@@ -291,7 +386,7 @@ export default function DeliveriesPage() {
                 {loading ? (
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={8}
                       className="py-12 text-center text-[#C9A227]"
                     >
                       جاري التحميل...
@@ -331,6 +426,13 @@ export default function DeliveriesPage() {
                         {delivery.location || "-"}
                       </td>
                       <td className="py-4 px-5 text-center">
+                        <PurchaseBadge
+                          hasPurchased={
+                            purchaseStatusByDeliveryId.get(delivery.id) ?? false
+                          }
+                        />
+                      </td>
+                      <td className="py-4 px-5 text-center">
                         <button
                           onClick={() => void handleDeleteDelivery(delivery)}
                           disabled={deletingId === delivery.id}
@@ -345,7 +447,7 @@ export default function DeliveriesPage() {
                 ) : (
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={8}
                       className="py-12 text-center text-[#665D4E]"
                     >
                       لا توجد تسليمات مطابقة.
@@ -361,12 +463,41 @@ export default function DeliveriesPage() {
   );
 }
 
-function SummaryCard({ title, value }: { title: string; value: string }) {
+function SummaryCard({
+  title,
+  value,
+  accent,
+}: {
+  title: string;
+  value: string;
+  accent?: string;
+}) {
   return (
     <div className="bg-[#1C1611] border border-dashed border-[#C9A227]/25 p-6 rounded-sm">
       <p className="text-[#8C8272] mb-2">{title}</p>
-      <h3 className="text-3xl font-bold font-mono text-white">{value}</h3>
+      <h3
+        className="text-3xl font-bold font-mono"
+        style={{ color: accent ?? "#FFFFFF" }}
+      >
+        {value}
+      </h3>
     </div>
+  );
+}
+
+function PurchaseBadge({ hasPurchased }: { hasPurchased: boolean }) {
+  if (hasPurchased) {
+    return (
+      <span className="bg-[#4C6B4F]/10 text-[#8FB08A] px-3 py-1 rounded-full text-xs border border-[#4C6B4F]/20 whitespace-nowrap">
+        اشترى ✓
+      </span>
+    );
+  }
+
+  return (
+    <span className="bg-[#C1523F]/10 text-[#E08A78] px-3 py-1 rounded-full text-xs border border-[#C1523F]/20 whitespace-nowrap">
+      لم يشترِ
+    </span>
   );
 }
 

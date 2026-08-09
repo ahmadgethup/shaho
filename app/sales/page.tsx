@@ -33,6 +33,19 @@ interface Customer {
   owner_name: string;
 }
 
+// Minimal shape of a "دفتر الديون" (loans register) entry, as needed from
+// the sales screen. total_amount is the customer's running debt balance.
+interface LoanOption {
+  id: number;
+  shop_name: string;
+  owner_name: string;
+  total_amount: number;
+}
+
+// "mixed" = part of the invoice is paid cash, part is added to the debt
+// register (دفتر الديون) for the selected loan account.
+type PaymentType = "cash" | "credit" | "mixed";
+
 interface Sale {
   id: number;
   product_id: number;
@@ -43,6 +56,15 @@ interface Sale {
   original_total_price: number;
   actual_total_price: number;
   discount_amount: number;
+  payment_type: PaymentType;
+  loan_id: number | null;
+  // How much of this sale row's actual_total_price was cash vs. credit.
+  // Populated for every row (cash rows: cash_amount = actual_total_price;
+  // credit rows: credit_amount = actual_total_price; mixed rows: split).
+  // May be null on rows written before the columns existed - callers fall
+  // back to payment_type in that case.
+  cash_amount: number | null;
+  credit_amount: number | null;
   created_at: string;
 }
 
@@ -63,6 +85,10 @@ interface ReceiptData {
   actualTotal: number;
   discount: number;
   customerName: string | null;
+  paymentType: PaymentType;
+  loanName: string | null;
+  cashAmount: number;
+  creditAmount: number;
 }
 
 // Editable shop / invoice info, persisted in Supabase (single row, id = 1).
@@ -87,8 +113,24 @@ const DEFAULT_INVOICE_SETTINGS: InvoiceSettings = {
 const filterPeriods = ["day", "month", "year"] as const;
 type FilterPeriod = (typeof filterPeriods)[number];
 
+const emptyNewLoanForm = {
+  shop_name: "",
+  owner_name: "",
+  phone: "",
+  location: "",
+};
+
 const formatIqd = (amount: number) =>
   `${Number(amount || 0).toLocaleString("en-IQ")} د.ع`;
+
+// Local (not UTC) yyyy-mm-dd, so "today" in the date picker matches the
+// shop's clock rather than shifting a day at UTC midnight.
+const getLocalDateString = (date: Date) => {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 
 // PostgREST returns at most 1,000 rows per request. Fetch every page so the
 // recurring-customer search stays complete as the customer list grows.
@@ -112,6 +154,27 @@ async function getAllCustomers(): Promise<Customer[]> {
   }
 }
 
+// Same pagination guard for the loans register.
+async function getAllLoans(): Promise<LoanOption[]> {
+  const pageSize = 1000;
+  const allLoans: LoanOption[] = [];
+
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from("loans")
+      .select("id, shop_name, owner_name, total_amount")
+      .order("shop_name")
+      .range(from, from + pageSize - 1);
+
+    if (error) throw error;
+
+    const page = (data ?? []) as LoanOption[];
+    allLoans.push(...page);
+
+    if (page.length < pageSize) return allLoans;
+  }
+}
+
 async function getInvoiceSettings(): Promise<InvoiceSettings> {
   const { data, error } = await supabase
     .from("invoice_settings")
@@ -128,9 +191,10 @@ async function getDashboardData(): Promise<{
   products: Product[];
   sales: Sale[];
   customers: Customer[];
+  loans: LoanOption[];
   invoiceSettings: InvoiceSettings;
 }> {
-  const [productsResult, salesResult, customers, invoiceSettings] =
+  const [productsResult, salesResult, customers, loans, invoiceSettings] =
     await Promise.all([
       supabase
         .from("products")
@@ -140,13 +204,16 @@ async function getDashboardData(): Promise<{
       supabase
         .from("sales")
         .select(
-          "id, product_id, product_name, quantity_sold, sale_type, stock_quantity_deducted, original_total_price, actual_total_price, discount_amount, created_at"
+          "id, product_id, product_name, quantity_sold, sale_type, stock_quantity_deducted, original_total_price, actual_total_price, discount_amount, payment_type, loan_id, cash_amount, credit_amount, created_at"
         )
         .order("created_at", { ascending: false }),
 
       // getAllCustomers() already returns Customer[] (or throws on error),
       // it is not a Supabase query response with .data/.error.
       getAllCustomers(),
+
+      // Same for getAllLoans().
+      getAllLoans(),
 
       // Same for getInvoiceSettings() - resolves to InvoiceSettings directly.
       getInvoiceSettings(),
@@ -159,6 +226,7 @@ async function getDashboardData(): Promise<{
     products: (productsResult.data ?? []) as Product[],
     sales: (salesResult.data ?? []) as Sale[],
     customers,
+    loans,
     invoiceSettings,
   };
 }
@@ -169,8 +237,12 @@ export default function Sales() {
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [loans, setLoans] = useState<LoanOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterPeriod, setFilterPeriod] = useState<FilterPeriod>("day");
+  const [selectedDate, setSelectedDate] = useState(() =>
+    getLocalDateString(new Date())
+  );
 
   const [selectedCategory, setSelectedCategory] = useState("");
   const [selectedProductId, setSelectedProductId] = useState("");
@@ -185,8 +257,24 @@ export default function Sales() {
   // field be genuinely emptied by the user.
   const [priceOverride, setPriceOverride] = useState<string | null>(null);
 
+  // نقد / دين / مختلط. Credit and mixed sales both use the loans-register
+  // picker below instead of the customer picker; mixed additionally asks
+  // how much of the total goes to the debt account.
+  const [paymentType, setPaymentType] = useState<PaymentType>("cash");
+
   const [customerSearch, setCustomerSearch] = useState("");
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
+
+  const [loanSearch, setLoanSearch] = useState("");
+  const [selectedLoanId, setSelectedLoanId] = useState("");
+  const [showNewLoanForm, setShowNewLoanForm] = useState(false);
+  const [newLoanForm, setNewLoanForm] = useState(emptyNewLoanForm);
+
+  // Only used when paymentType === "mixed": how much of the total invoice
+  // amount should be recorded as debt. `null` means "no manual edit yet".
+  const [creditPortionOverride, setCreditPortionOverride] = useState<
+    string | null
+  >(null);
 
   const [cart, setCart] = useState<CartItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -216,6 +304,7 @@ export default function Sales() {
           products: fetchedProducts,
           sales: fetchedSales,
           customers: fetchedCustomers,
+          loans: fetchedLoans,
           invoiceSettings: fetchedInvoiceSettings,
         }) => {
           if (!isMounted) return;
@@ -223,6 +312,7 @@ export default function Sales() {
           setProducts(fetchedProducts);
           setSales(fetchedSales);
           setCustomers(fetchedCustomers);
+          setLoans(fetchedLoans);
           setInvoiceSettings(fetchedInvoiceSettings);
           setLoading(false);
         }
@@ -247,12 +337,14 @@ export default function Sales() {
         products: fetchedProducts,
         sales: fetchedSales,
         customers: fetchedCustomers,
+        loans: fetchedLoans,
         invoiceSettings: fetchedInvoiceSettings,
       } = await getDashboardData();
 
       setProducts(fetchedProducts);
       setSales(fetchedSales);
       setCustomers(fetchedCustomers);
+      setLoans(fetchedLoans);
       setInvoiceSettings(fetchedInvoiceSettings);
     } catch (error: unknown) {
       console.error("Error refreshing dashboard data:", error);
@@ -297,6 +389,23 @@ export default function Sales() {
     [customers, selectedCustomerId]
   );
 
+  const filteredLoansForSale = useMemo(() => {
+    const query = loanSearch.trim().toLowerCase();
+
+    if (!query) return loans;
+
+    return loans.filter((loan) =>
+      [loan.shop_name, loan.owner_name].some((value) =>
+        value?.toLowerCase().includes(query)
+      )
+    );
+  }, [loans, loanSearch]);
+
+  const selectedLoan = useMemo(
+    () => loans.find((loan) => loan.id.toString() === selectedLoanId) ?? null,
+    [loans, selectedLoanId]
+  );
+
   const itemTotal = useMemo(() => {
     if (!selectedProduct || !quantity) return 0;
 
@@ -334,6 +443,33 @@ export default function Sales() {
     [priceOverride, cartTotal]
   );
 
+  // Total invoice amount as a number, for the mixed-payment math below.
+  const totalAmountNumber = useMemo(() => {
+    const parsed = parseFloat(actualPrice);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }, [actualPrice]);
+
+  // How much of the invoice is credit (goes to the loans register) vs.
+  // cash, for each payment type:
+  // - cash: all cash, no credit
+  // - credit: all credit, no cash
+  // - mixed: whatever the cashier typed into the credit-portion field,
+  //   clamped to [0, total]. The cash portion is always the remainder.
+  const creditAmountValue = useMemo(() => {
+    if (paymentType === "cash") return 0;
+    if (paymentType === "credit") return totalAmountNumber;
+
+    if (creditPortionOverride === null) return 0;
+    const parsed = parseFloat(creditPortionOverride);
+    if (Number.isNaN(parsed)) return 0;
+    return Math.min(Math.max(parsed, 0), totalAmountNumber);
+  }, [paymentType, totalAmountNumber, creditPortionOverride]);
+
+  const cashAmountValue = useMemo(
+    () => Math.max(0, totalAmountNumber - creditAmountValue),
+    [totalAmountNumber, creditAmountValue]
+  );
+
   const filteredSales = useMemo(() => {
     const now = new Date();
 
@@ -341,7 +477,7 @@ export default function Sales() {
       const saleDate = new Date(sale.created_at);
 
       if (filterPeriod === "day") {
-        return saleDate.toDateString() === now.toDateString();
+        return getLocalDateString(saleDate) === selectedDate;
       }
 
       if (filterPeriod === "month") {
@@ -353,26 +489,58 @@ export default function Sales() {
 
       return saleDate.getFullYear() === now.getFullYear();
     });
-  }, [sales, filterPeriod]);
+  }, [sales, filterPeriod, selectedDate]);
 
   const summary = useMemo(
     () =>
       filteredSales.reduce(
-        (total, sale) => ({
-          totalRevenue:
-            total.totalRevenue + Number(sale.actual_total_price || 0),
-          totalDiscount:
-            total.totalDiscount + Number(sale.discount_amount || 0),
-          totalItems: total.totalItems + 1,
-        }),
+        (total, sale) => {
+          // Prefer the stored cash/credit split when present (covers cash,
+          // credit, and mixed rows alike). Fall back to the old
+          // all-or-nothing logic for rows written before these columns
+          // existed.
+          const cashPart =
+            sale.cash_amount != null
+              ? Number(sale.cash_amount)
+              : sale.payment_type === "credit"
+              ? 0
+              : Number(sale.actual_total_price || 0);
+
+          const creditPart =
+            sale.credit_amount != null
+              ? Number(sale.credit_amount)
+              : sale.payment_type === "credit"
+              ? Number(sale.actual_total_price || 0)
+              : 0;
+
+          return {
+            totalRevenue:
+              total.totalRevenue + Number(sale.actual_total_price || 0),
+            totalDiscount:
+              total.totalDiscount + Number(sale.discount_amount || 0),
+            totalItems: total.totalItems + 1,
+            totalMeters:
+              total.totalMeters + Number(sale.stock_quantity_deducted || 0),
+            totalCash: total.totalCash + cashPart,
+            totalCredit: total.totalCredit + creditPart,
+          };
+        },
         {
           totalRevenue: 0,
           totalDiscount: 0,
           totalItems: 0,
+          totalMeters: 0,
+          totalCash: 0,
+          totalCredit: 0,
         }
       ),
     [filteredSales]
   );
+
+  const getLoanNameForSale = (loanId: number | null) => {
+    if (!loanId) return null;
+    return loans.find((loan) => loan.id === loanId)?.shop_name ?? null;
+  };
 
   const resetProductForm = () => {
     setSelectedProductId("");
@@ -386,6 +554,14 @@ export default function Sales() {
     setCustomerSearch("");
   };
 
+  const resetLoanSelection = () => {
+    setSelectedLoanId("");
+    setLoanSearch("");
+    setShowNewLoanForm(false);
+    setNewLoanForm(emptyNewLoanForm);
+    setCreditPortionOverride(null);
+  };
+
   const handleCategoryChange = (category: string) => {
     setSelectedCategory(category);
     resetProductForm();
@@ -396,6 +572,22 @@ export default function Sales() {
 
     if (type === "meter") {
       setRollSizeMeters("");
+    }
+  };
+
+  // Switching بين نقد/دين/مختلط clears whichever side (customer vs. loan)
+  // is no longer relevant, so a stale selection can't leak into the sale.
+  const handlePaymentTypeChange = (type: PaymentType) => {
+    setPaymentType(type);
+
+    if (type === "cash") {
+      resetLoanSelection();
+    } else {
+      resetCustomerSelection();
+
+      if (type === "credit") {
+        setCreditPortionOverride(null);
+      }
     }
   };
 
@@ -626,14 +818,106 @@ export default function Sales() {
       return;
     }
 
+    if (paymentType === "credit" || paymentType === "mixed") {
+      if (showNewLoanForm) {
+        if (!newLoanForm.shop_name.trim()) {
+          alert("يرجى إدخال اسم المحل لإضافته إلى دفتر الديون.");
+          return;
+        }
+      } else if (!selectedLoanId) {
+        alert("يرجى اختيار اسم من دفتر الديون أو إضافة اسم جديد.");
+        return;
+      }
+    }
+
+    if (
+      paymentType === "mixed" &&
+      (creditAmountValue <= 0 || cashAmountValue <= 0)
+    ) {
+      alert(
+        "الدفع المختلط يتطلب مبلغاً نقدياً ومبلغاً كديناً أكبر من صفر لكل منهما. إذا كان المبلغ بالكامل نقداً أو ديناً، اختر النوع المناسب بدلاً من ذلك."
+      );
+      return;
+    }
+
     setIsProcessing(true);
 
+    // For a credit or mixed sale, first resolve (or create) the
+    // loans-register entry and raise its balance by the credit portion.
+    // This happens before the sale rows are written so we have a loan_id
+    // to attach to each of them.
+    let loanIdToUse: number | null = null;
+    let loanNameForReceipt: string | null = null;
+
+    if (paymentType === "credit" || paymentType === "mixed") {
+      const debtAmount = creditAmountValue;
+
+      if (showNewLoanForm) {
+        const { data: newLoan, error: newLoanError } = await supabase
+          .from("loans")
+          .insert({
+            shop_name: newLoanForm.shop_name.trim(),
+            owner_name: newLoanForm.owner_name.trim(),
+            phone: newLoanForm.phone.trim(),
+            location: newLoanForm.location.trim(),
+            total_amount: debtAmount,
+            notes: "",
+          })
+          .select("id, shop_name")
+          .single();
+
+        if (newLoanError || !newLoan) {
+          console.error("Error creating loan entry:", newLoanError);
+          alert("تعذر إضافة الاسم إلى دفتر الديون.");
+          setIsProcessing(false);
+          return;
+        }
+
+        loanIdToUse = newLoan.id;
+        loanNameForReceipt = newLoan.shop_name;
+      } else {
+        const existingLoan = loans.find(
+          (loan) => loan.id.toString() === selectedLoanId
+        );
+
+        if (!existingLoan) {
+          alert("تعذر العثور على الاسم المحدد في دفتر الديون.");
+          setIsProcessing(false);
+          return;
+        }
+
+        const { error: updateLoanError } = await supabase
+          .from("loans")
+          .update({ total_amount: existingLoan.total_amount + debtAmount })
+          .eq("id", existingLoan.id);
+
+        if (updateLoanError) {
+          console.error("Error updating loan balance:", updateLoanError);
+          alert("تعذر تحديث رصيد الدين.");
+          setIsProcessing(false);
+          return;
+        }
+
+        loanIdToUse = existingLoan.id;
+        loanNameForReceipt = existingLoan.shop_name;
+      }
+    }
+
     const invoiceNumber = `INV-${Date.now()}`;
-    const customerIdToSave = selectedCustomerId || null;
+    const customerIdToSave =
+      paymentType === "cash" ? selectedCustomerId || null : null;
 
     const saleRows = cart.map((item) => {
       const actualItemPrice =
         cartTotal > 0 ? (item.total / cartTotal) * finalPrice : 0;
+
+      // Split this row's price the same way the overall invoice is split
+      // between cash and credit, so per-item records stay consistent with
+      // the invoice total.
+      const itemCashAmount =
+        finalPrice > 0 ? (actualItemPrice / finalPrice) * cashAmountValue : 0;
+      const itemCreditAmount =
+        finalPrice > 0 ? (actualItemPrice / finalPrice) * creditAmountValue : 0;
 
       return {
         product_id: item.product.id,
@@ -645,6 +929,10 @@ export default function Sales() {
         customer_id: customerIdToSave,
         invoice_number: invoiceNumber,
         stock_quantity_deducted: item.metersToDeduct,
+        payment_type: paymentType,
+        loan_id: loanIdToUse,
+        cash_amount: itemCashAmount,
+        credit_amount: itemCreditAmount,
       };
     });
 
@@ -689,13 +977,20 @@ export default function Sales() {
       originalTotal: cartTotal,
       actualTotal: finalPrice,
       discount: Math.max(0, cartTotal - finalPrice),
-      customerName: selectedCustomer?.shop_name ?? null,
+      customerName:
+        paymentType === "cash" ? selectedCustomer?.shop_name ?? null : null,
+      paymentType,
+      loanName: loanNameForReceipt,
+      cashAmount: cashAmountValue,
+      creditAmount: creditAmountValue,
     });
 
     setCart([]);
     setSelectedCategory("");
     resetProductForm();
     resetCustomerSelection();
+    resetLoanSelection();
+    setPaymentType("cash");
     setPriceOverride(null);
 
     await refreshData();
@@ -770,55 +1065,290 @@ export default function Sales() {
 
             <form onSubmit={handleCheckout} className="flex flex-col gap-5">
               <div className="bg-[#221B14] border border-dashed border-[#C9A227]/30 rounded-sm p-4">
-                <div className="flex justify-between items-center mb-2">
-                  <label className="text-[#C9A227] text-sm font-bold">
-                    الزبون (اختياري)
-                  </label>
+                <label className="block text-[#C9A227] text-sm font-bold mb-2">
+                  نوع البيع
+                </label>
+
+                <div className="flex bg-[#0E0B08] rounded-sm p-1 border border-[#3A3128]">
+                  <button
+                    type="button"
+                    onClick={() => handlePaymentTypeChange("cash")}
+                    className={`flex-1 py-3 rounded-sm font-medium transition-colors text-sm sm:text-base ${
+                      paymentType === "cash"
+                        ? "bg-[#C9A227] text-[#171310]"
+                        : "text-[#8C8272] hover:text-white"
+                    }`}
+                  >
+                    نقد
+                  </button>
 
                   <button
                     type="button"
-                    onClick={() => router.push("/customers")}
-                    className="text-xs text-[#8C8272] hover:text-[#C9A227] transition-colors"
+                    onClick={() => handlePaymentTypeChange("credit")}
+                    className={`flex-1 py-3 rounded-sm font-medium transition-colors text-sm sm:text-base ${
+                      paymentType === "credit"
+                        ? "bg-[#C1523F] text-white"
+                        : "text-[#8C8272] hover:text-white"
+                    }`}
                   >
-                    + زبون جديد
+                    دين (بالأجل)
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handlePaymentTypeChange("mixed")}
+                    className={`flex-1 py-3 rounded-sm font-medium transition-colors text-sm sm:text-base ${
+                      paymentType === "mixed"
+                        ? "bg-[#7FA3C2] text-[#171310]"
+                        : "text-[#8C8272] hover:text-white"
+                    }`}
+                  >
+                    مختلط (نقد + دين)
                   </button>
                 </div>
-
-                <input
-                  type="text"
-                  value={customerSearch}
-                  onChange={(event) => setCustomerSearch(event.target.value)}
-                  placeholder="ابحث عن اسم المحل أو صاحبه..."
-                  className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 mb-2 focus:outline-none focus:border-[#C9A227]"
-                />
-
-                <select
-                  value={selectedCustomerId}
-                  onChange={(event) =>
-                    setSelectedCustomerId(event.target.value)
-                  }
-                  className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
-                >
-                  <option value="">-- بدون زبون (بيع عابر) --</option>
-
-                  {filteredCustomersForSale.map((customer) => (
-                    <option key={customer.id} value={customer.id}>
-                      {customer.shop_name}
-                      {customer.owner_name ? ` — ${customer.owner_name}` : ""}
-                    </option>
-                  ))}
-                </select>
-
-                {selectedCustomer && (
-                  <p className="text-xs text-[#8C8272] mt-2">
-                    سيتم تسجيل هذه الفاتورة ضمن سجل مشتريات{" "}
-                    <span className="text-[#C9A227] font-bold">
-                      {selectedCustomer.shop_name}
-                    </span>
-                    .
-                  </p>
-                )}
               </div>
+
+              {paymentType === "cash" ? (
+                <div className="bg-[#221B14] border border-dashed border-[#C9A227]/30 rounded-sm p-4">
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="text-[#C9A227] text-sm font-bold">
+                      الزبون (اختياري)
+                    </label>
+
+                    <button
+                      type="button"
+                      onClick={() => router.push("/customers")}
+                      className="text-xs text-[#8C8272] hover:text-[#C9A227] transition-colors"
+                    >
+                      + زبون جديد
+                    </button>
+                  </div>
+
+                  <input
+                    type="text"
+                    value={customerSearch}
+                    onChange={(event) => setCustomerSearch(event.target.value)}
+                    placeholder="ابحث عن اسم المحل أو صاحبه..."
+                    className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 mb-2 focus:outline-none focus:border-[#C9A227]"
+                  />
+
+                  <select
+                    value={selectedCustomerId}
+                    onChange={(event) =>
+                      setSelectedCustomerId(event.target.value)
+                    }
+                    className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
+                  >
+                    <option value="">-- بدون زبون (بيع عابر) --</option>
+
+                    {filteredCustomersForSale.map((customer) => (
+                      <option key={customer.id} value={customer.id}>
+                        {customer.shop_name}
+                        {customer.owner_name ? ` — ${customer.owner_name}` : ""}
+                      </option>
+                    ))}
+                  </select>
+
+                  {selectedCustomer && (
+                    <p className="text-xs text-[#8C8272] mt-2">
+                      سيتم تسجيل هذه الفاتورة ضمن سجل مشتريات{" "}
+                      <span className="text-[#C9A227] font-bold">
+                        {selectedCustomer.shop_name}
+                      </span>
+                      .
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="bg-[#221B14] border border-dashed border-[#C1523F]/40 rounded-sm p-4">
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="text-[#E08A78] text-sm font-bold">
+                      دفتر الديون (اختر الزبون)
+                    </label>
+
+                    {!showNewLoanForm && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowNewLoanForm(true);
+                          setSelectedLoanId("");
+                        }}
+                        className="text-xs text-[#8C8272] hover:text-[#E08A78] transition-colors"
+                      >
+                        + اسم جديد لم يُسجَّل بعد
+                      </button>
+                    )}
+                  </div>
+
+                  {!showNewLoanForm ? (
+                    <>
+                      <input
+                        type="text"
+                        value={loanSearch}
+                        onChange={(event) => setLoanSearch(event.target.value)}
+                        placeholder="ابحث عن اسم المحل أو صاحبه في دفتر الديون..."
+                        className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 mb-2 focus:outline-none focus:border-[#E08A78]"
+                      />
+
+                      <select
+                        value={selectedLoanId}
+                        onChange={(event) =>
+                          setSelectedLoanId(event.target.value)
+                        }
+                        className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#E08A78]"
+                      >
+                        <option value="">-- اختر من دفتر الديون --</option>
+
+                        {filteredLoansForSale.map((loan) => (
+                          <option key={loan.id} value={loan.id}>
+                            {loan.shop_name}
+                            {loan.owner_name
+                              ? ` — ${loan.owner_name}`
+                              : ""}{" "}
+                            (دين سابق: {formatIqd(loan.total_amount)})
+                          </option>
+                        ))}
+                      </select>
+
+                      {filteredLoansForSale.length === 0 &&
+                        loanSearch.trim() !== "" && (
+                          <p className="text-xs text-[#8C8272] mt-2">
+                            لا يوجد اسم مطابق في دفتر الديون. يمكنك إضافته كاسم
+                            جديد.
+                          </p>
+                        )}
+                    </>
+                  ) : (
+                    <div className="flex flex-col gap-3">
+                      <input
+                        type="text"
+                        value={newLoanForm.shop_name}
+                        onChange={(event) =>
+                          setNewLoanForm((form) => ({
+                            ...form,
+                            shop_name: event.target.value,
+                          }))
+                        }
+                        placeholder="اسم المحل *"
+                        className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#E08A78]"
+                      />
+
+                      <input
+                        type="text"
+                        value={newLoanForm.owner_name}
+                        onChange={(event) =>
+                          setNewLoanForm((form) => ({
+                            ...form,
+                            owner_name: event.target.value,
+                          }))
+                        }
+                        placeholder="اسم صاحب المحل"
+                        className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#E08A78]"
+                      />
+
+                      <input
+                        type="tel"
+                        value={newLoanForm.phone}
+                        onChange={(event) =>
+                          setNewLoanForm((form) => ({
+                            ...form,
+                            phone: event.target.value,
+                          }))
+                        }
+                        placeholder="رقم الموبايل"
+                        dir="ltr"
+                        className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#E08A78] font-mono"
+                      />
+
+                      <input
+                        type="text"
+                        value={newLoanForm.location}
+                        onChange={(event) =>
+                          setNewLoanForm((form) => ({
+                            ...form,
+                            location: event.target.value,
+                          }))
+                        }
+                        placeholder="موقع المحل"
+                        className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#E08A78]"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowNewLoanForm(false);
+                          setNewLoanForm(emptyNewLoanForm);
+                        }}
+                        className="text-xs text-[#8C8272] hover:text-white self-start"
+                      >
+                        إلغاء والعودة لاختيار اسم موجود
+                      </button>
+                    </div>
+                  )}
+
+                  {paymentType === "mixed" && (
+                    <div className="mt-4 pt-4 border-t border-dashed border-[#3A3128]">
+                      <label className="block text-[#7FA3C2] text-sm font-bold mb-2">
+                        المبلغ الذي سيُسجَّل كدين (من إجمالي الفاتورة)
+                      </label>
+
+                      <input
+                        type="number"
+                        step="1"
+                        min="0"
+                        max={totalAmountNumber || undefined}
+                        disabled={cart.length === 0}
+                        value={
+                          creditPortionOverride ??
+                          (creditAmountValue > 0
+                            ? creditAmountValue.toString()
+                            : "")
+                        }
+                        onChange={(event) =>
+                          setCreditPortionOverride(event.target.value)
+                        }
+                        className="w-full bg-[#0E0B08] border border-[#7FA3C2]/50 text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#7FA3C2] disabled:opacity-50"
+                        placeholder="مثال: 25000"
+                      />
+
+                      <div className="flex justify-between text-xs text-[#8C8272] mt-2">
+                        <span>
+                          نقداً:{" "}
+                          <span className="text-[#8FB08A] font-mono">
+                            {formatIqd(cashAmountValue)}
+                          </span>
+                        </span>
+
+                        <span>
+                          ديناً:{" "}
+                          <span className="text-[#E08A78] font-mono">
+                            {formatIqd(creditAmountValue)}
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  <p className="text-xs text-[#8C8272] mt-3">
+                    {paymentType === "mixed"
+                      ? "سيتم تسجيل الجزء المحدد أعلاه كدين، والباقي يُعتبر مبلغاً نقدياً مستلماً، "
+                      : "سيتم تسجيل مبلغ هذه الفاتورة كدين "}
+                    {showNewLoanForm ? (
+                      "على اسم جديد سيُضاف إلى دفتر الديون."
+                    ) : selectedLoan ? (
+                      <>
+                        على حساب{" "}
+                        <span className="text-[#E08A78] font-bold">
+                          {selectedLoan.shop_name}
+                        </span>
+                        .
+                      </>
+                    ) : (
+                      "بعد اختيار الاسم."
+                    )}
+                  </p>
+                </div>
+              )}
 
               <div>
                 <label className="block text-[#8C8272] text-sm mb-2">
@@ -892,7 +1422,7 @@ export default function Sales() {
                         : "text-[#8C8272] hover:text-white"
                     }`}
                   >
-                    بالبكرة
+                    رول-توب
                   </button>
                 </div>
               </div>
@@ -1028,7 +1558,11 @@ export default function Sales() {
                 </div>
 
                 <label className="block text-[#C9A227] text-sm mb-2 font-bold">
-                  المبلغ المستلم الفعلي
+                  {paymentType === "cash"
+                    ? "المبلغ المستلم الفعلي"
+                    : paymentType === "credit"
+                    ? "المبلغ الذي سيُسجَّل كدين"
+                    : "إجمالي الفاتورة (نقد + دين)"}
                 </label>
 
                 <input
@@ -1046,11 +1580,21 @@ export default function Sales() {
               <button
                 type="submit"
                 disabled={isProcessing || loading || cart.length === 0}
-                className="w-full flex items-center justify-center gap-2 bg-[#C9A227] hover:bg-[#D9B84A] text-[#171310] font-bold py-5 rounded-sm transition-all disabled:opacity-50"
+                className={`w-full flex items-center justify-center gap-2 font-bold py-5 rounded-sm transition-all disabled:opacity-50 ${
+                  paymentType === "credit"
+                    ? "bg-[#C1523F] hover:bg-[#D06450] text-white"
+                    : paymentType === "mixed"
+                    ? "bg-[#7FA3C2] hover:bg-[#8FB5D6] text-[#171310]"
+                    : "bg-[#C9A227] hover:bg-[#D9B84A] text-[#171310]"
+                }`}
               >
                 <CartIcon />
                 {isProcessing
                   ? "جاري إتمام البيع..."
+                  : paymentType === "credit"
+                  ? "تسجيل البيع كدين وإصدار الفاتورة"
+                  : paymentType === "mixed"
+                  ? "تسجيل البيع كدفع مختلط وإصدار الفاتورة"
                   : "إتمام البيع وإصدار الفاتورة"}
               </button>
             </form>
@@ -1061,31 +1605,60 @@ export default function Sales() {
             animate={{ opacity: 1, x: 0 }}
             className="w-full lg:w-[58%] flex flex-col gap-6"
           >
-            <div className="flex justify-center md:justify-start gap-4">
-              {filterPeriods.map((period) => (
-                <button
-                  key={period}
-                  onClick={() => setFilterPeriod(period)}
-                  className={`px-6 py-2 rounded-full border transition-all ${
-                    filterPeriod === period
-                      ? "bg-[#C9A227] border-[#C9A227] text-[#171310] font-bold"
-                      : "bg-transparent border-[#3A3128] text-[#8C8272] hover:border-[#C9A227]/50"
-                  }`}
-                >
-                  {period === "day"
-                    ? "مبيعات اليوم"
-                    : period === "month"
-                    ? "مبيعات الشهر"
-                    : "مبيعات السنة"}
-                </button>
-              ))}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-center md:justify-start gap-4">
+              <div className="flex justify-center md:justify-start gap-4">
+                {filterPeriods.map((period) => (
+                  <button
+                    key={period}
+                    onClick={() => setFilterPeriod(period)}
+                    className={`px-6 py-2 rounded-full border transition-all ${
+                      filterPeriod === period
+                        ? "bg-[#C9A227] border-[#C9A227] text-[#171310] font-bold"
+                        : "bg-transparent border-[#3A3128] text-[#8C8272] hover:border-[#C9A227]/50"
+                    }`}
+                  >
+                    {period === "day"
+                      ? "مبيعات يوم محدد"
+                      : period === "month"
+                      ? "مبيعات الشهر"
+                      : "مبيعات السنة"}
+                  </button>
+                ))}
+              </div>
+
+              {filterPeriod === "day" && (
+                <input
+                  type="date"
+                  value={selectedDate}
+                  onChange={(event) => setSelectedDate(event.target.value)}
+                  className="bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm px-4 py-2 focus:outline-none focus:border-[#C9A227] font-mono"
+                />
+              )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
               <SummaryCard
                 title="إجمالي الإيرادات"
                 value={formatIqd(summary.totalRevenue)}
                 color="text-white"
+              />
+
+              <SummaryCard
+                title="الأمتار المباعة"
+                value={`${summary.totalMeters.toLocaleString("en-IQ")} متر`}
+                color="text-[#EDE6D6]"
+              />
+
+              <SummaryCard
+                title="مبيعات نقدية"
+                value={formatIqd(summary.totalCash)}
+                color="text-[#8FB08A]"
+              />
+
+              <SummaryCard
+                title="مبيعات بالدين"
+                value={formatIqd(summary.totalCredit)}
+                color="text-[#E08A78]"
               />
 
               <SummaryCard
@@ -1105,7 +1678,10 @@ export default function Sales() {
               <h3 className="text-xl font-bold text-[#EDE6D6] mb-6 border-b border-dashed border-[#3A3128] pb-4">
                 سجل المبيعات (
                 {filterPeriod === "day"
-                  ? "اليوم"
+                  ? new Date(`${selectedDate}T00:00:00`).toLocaleDateString(
+                      "ar-IQ",
+                      { year: "numeric", month: "2-digit", day: "2-digit" }
+                    )
                   : filterPeriod === "month"
                   ? "الشهر"
                   : "السنة"}
@@ -1121,6 +1697,9 @@ export default function Sales() {
                       <th className="py-3 px-4 font-normal">الكمية</th>
                       <th className="py-3 px-4 font-normal">السعر النهائي</th>
                       <th className="py-3 px-4 font-normal text-center">
+                        طريقة الدفع
+                      </th>
+                      <th className="py-3 px-4 font-normal text-center">
                         الخصم
                       </th>
                       <th className="py-3 px-4 font-normal text-center">
@@ -1133,7 +1712,7 @@ export default function Sales() {
                     {loading ? (
                       <tr>
                         <td
-                          colSpan={6}
+                          colSpan={7}
                           className="py-12 text-center text-[#C9A227]"
                         >
                           جاري تحميل المبيعات...
@@ -1171,6 +1750,31 @@ export default function Sales() {
                           </td>
 
                           <td className="py-4 px-4 text-center">
+                            {sale.payment_type === "credit" ? (
+                              <span className="bg-[#C1523F]/10 text-[#E08A78] px-3 py-1 rounded-full text-xs border border-[#C1523F]/20 whitespace-nowrap">
+                                دين
+                                {getLoanNameForSale(sale.loan_id)
+                                  ? ` — ${getLoanNameForSale(sale.loan_id)}`
+                                  : ""}
+                              </span>
+                            ) : sale.payment_type === "mixed" ? (
+                              <span className="bg-[#7FA3C2]/10 text-[#7FA3C2] px-3 py-1 rounded-full text-xs border border-[#7FA3C2]/20 whitespace-nowrap">
+                                مختلط
+                                {getLoanNameForSale(sale.loan_id)
+                                  ? ` — ${getLoanNameForSale(sale.loan_id)}`
+                                  : ""}
+                                {sale.credit_amount != null
+                                  ? ` (دين: ${formatIqd(sale.credit_amount)})`
+                                  : ""}
+                              </span>
+                            ) : (
+                              <span className="bg-[#4C6B4F]/10 text-[#8FB08A] px-3 py-1 rounded-full text-xs border border-[#4C6B4F]/20">
+                                نقد
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="py-4 px-4 text-center">
                             {sale.discount_amount > 0 ? (
                               <span className="bg-[#C1523F]/10 text-[#E08A78] px-3 py-1 rounded-full text-xs border border-[#C1523F]/20 font-mono">
                                 {formatIqd(sale.discount_amount)}
@@ -1197,7 +1801,7 @@ export default function Sales() {
                     ) : (
                       <tr>
                         <td
-                          colSpan={6}
+                          colSpan={7}
                           className="py-12 text-center text-[#665D4E]"
                         >
                           لا توجد مبيعات في هذه الفترة.
@@ -1398,6 +2002,11 @@ export default function Sales() {
                       </h2>
                       <p className="text-sm text-[#6b5a46] mt-2">
                         فاتورة مبيعات
+                        {receipt.paymentType === "credit"
+                          ? " (دين)"
+                          : receipt.paymentType === "mixed"
+                          ? " (دفع مختلط)"
+                          : " (نقد)"}
                       </p>
 
                       {(invoiceSettings.phone_1 ||
@@ -1442,10 +2051,18 @@ export default function Sales() {
                       </div>
                     </div>
 
-                    {receipt.customerName && (
+                    {(receipt.customerName || receipt.loanName) && (
                       <div className="text-sm mb-5">
-                        <p className="text-[#6b5a46]">الزبون</p>
-                        <p className="font-bold">{receipt.customerName}</p>
+                        <p className="text-[#6b5a46]">
+                          {receipt.paymentType === "credit"
+                            ? "الزبون (دين مسجَّل على دفتر الديون)"
+                            : receipt.paymentType === "mixed"
+                            ? "الزبون (دفع مختلط - دين مسجَّل على دفتر الديون)"
+                            : "الزبون"}
+                        </p>
+                        <p className="font-bold">
+                          {receipt.customerName ?? receipt.loanName}
+                        </p>
                       </div>
                     )}
 
@@ -1503,12 +2120,32 @@ export default function Sales() {
                         valueClassName="text-[#b0382b]"
                       />
 
+                      {receipt.paymentType === "mixed" && (
+                        <>
+                          <ReceiptRow
+                            label="المبلغ المستلم نقداً"
+                            value={formatIqd(receipt.cashAmount)}
+                            valueClassName="text-[#4c7a49]"
+                          />
+
+                          <ReceiptRow
+                            label="المبلغ المسجَّل كدين"
+                            value={formatIqd(receipt.creditAmount)}
+                            valueClassName="text-[#b0382b]"
+                          />
+                        </>
+                      )}
+
                       <div
                         className="flex justify-between items-center border-t border-dashed pt-4"
                         style={{ borderColor: invoiceSettings.accent_color }}
                       >
                         <span className="font-bold text-lg">
-                          المبلغ المستلم
+                          {receipt.paymentType === "credit"
+                            ? "المبلغ المسجَّل كدين"
+                            : receipt.paymentType === "mixed"
+                            ? "إجمالي الفاتورة"
+                            : "المبلغ المستلم"}
                         </span>
                         <span
                           className="font-bold text-2xl"
@@ -1570,9 +2207,9 @@ function SummaryCard({
   color: string;
 }) {
   return (
-    <div className="bg-[#1C1611] border border-dashed border-[#C9A227]/25 p-6 rounded-sm">
-      <p className="text-[#8C8272] mb-2">{title}</p>
-      <h3 className={`text-2xl font-bold font-mono ${color}`}>{value}</h3>
+    <div className="bg-[#1C1611] border border-dashed border-[#C9A227]/25 p-5 rounded-sm">
+      <p className="text-[#8C8272] mb-2 text-sm">{title}</p>
+      <h3 className={`text-xl font-bold font-mono ${color}`}>{value}</h3>
     </div>
   );
 }
