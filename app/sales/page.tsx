@@ -667,9 +667,38 @@ export default function Sales() {
 
     if (error) {
       console.error("Error deleting sale:", error);
-      alert(`تعذر حذف المبيعة: ${error.message}`);
-      setDeletingSaleId(null);
-      return;
+
+      // This RPC also tries to restore the deducted quantity onto the
+      // matching product row. If that product was since removed from the
+      // inventory, the RPC has nowhere to restore the stock to and fails -
+      // and since the whole call is one transaction, the sale never gets
+      // deleted either, even though the user just wants the transaction
+      // gone. Offer a fallback: delete the sale record directly, without
+      // restoring stock, since there is no inventory row left to restore
+      // it to.
+      const wantsForceDelete = window.confirm(
+        `تعذر حذف المبيعة تلقائياً مع إرجاع الكمية إلى المخزون (سبب محتمل: القماش «${sale.product_name}» لم يعد موجوداً في المخزون).\n\nهل تريد حذف الفاتورة فقط بدون إرجاع الكمية إلى المخزون؟`
+      );
+
+      if (!wantsForceDelete) {
+        setDeletingSaleId(null);
+        return;
+      }
+
+      const { error: forceDeleteError } = await supabase
+        .from("sales")
+        .delete()
+        .eq("id", sale.id);
+
+      if (forceDeleteError) {
+        console.error(
+          "Error force-deleting sale without stock restore:",
+          forceDeleteError
+        );
+        alert(`تعذر حذف المبيعة: ${forceDeleteError.message}`);
+        setDeletingSaleId(null);
+        return;
+      }
     }
 
     await refreshData();
