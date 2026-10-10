@@ -1,35 +1,50 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+
 import { useRouter } from "next/navigation";
+
 import { AnimatePresence, motion } from "framer-motion";
+
 import { Cairo, Aref_Ruqaa } from "next/font/google";
+
 import { supabase } from "@/lib/supabase";
 
 const cairo = Cairo({
   subsets: ["arabic"],
+
   weight: ["400", "600", "700", "800"],
 });
 
 const arefRuqaa = Aref_Ruqaa({
   subsets: ["arabic"],
+
   weight: ["400", "700"],
 });
 
 interface Product {
   id: number;
+
   name: string;
+
   category: string;
+
   quantity: number;
+
   price_per_meter: number;
+
   price_per_roll: number;
 }
 
 const emptyForm = {
   name: "",
+
   category: "",
+
   quantity: "",
+
   price_per_meter: "",
+
   price_per_roll: "",
 };
 
@@ -40,22 +55,124 @@ export default function Inventory() {
   const router = useRouter();
 
   const [nameSearch, setNameSearch] = useState("");
+
   const [categorySearch, setCategorySearch] = useState("");
+
   const [products, setProducts] = useState<Product[]>([]);
+
   const [loading, setLoading] = useState(true);
+
   const [isModalOpen, setIsModalOpen] = useState(false);
+
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+
   const [formData, setFormData] = useState(emptyForm);
+  // إضافة جماعية دون تغيير وظائف التعديل والحذف الحالية
+  const [fabricCount, setFabricCount] = useState(1);
+  const [bulkFabrics, setBulkFabrics] = useState([
+    {
+      name: "",
+      quantity: "",
+      price_per_meter: "",
+      price_per_roll: "",
+    },
+  ]);
+  const [isSavingBulk, setIsSavingBulk] = useState(false);
+
+  const changeFabricCount = (count: number) => {
+    const safeCount = Number.isFinite(count)
+      ? Math.max(1, Math.min(500, Math.floor(count)))
+      : 1;
+    setFabricCount(safeCount);
+    setBulkFabrics((previous) =>
+      Array.from(
+        { length: safeCount },
+        (_, i) =>
+          previous[i] ?? {
+            name: "",
+            quantity: "",
+            price_per_meter: "",
+            price_per_roll: "",
+          }
+      )
+    );
+  };
+
+  const updateBulkFabric = (
+    index: number,
+    field: keyof (typeof bulkFabrics)[number],
+    value: string
+  ) => {
+    setBulkFabrics((previous) =>
+      previous.map((fabric, i) =>
+        i === index ? { ...fabric, [field]: value } : fabric
+      )
+    );
+  };
+
+  const handleBulkSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSavingBulk) return;
+    const category = formData.category.trim();
+    if (!category || bulkFabrics.some((fabric) => !fabric.name.trim())) {
+      alert("يرجى إدخال التصنيف وأسماء جميع الأقمشة.");
+      return;
+    }
+    const numericFields = [
+      "quantity",
+      "price_per_meter",
+      "price_per_roll",
+    ] as const;
+    if (
+      bulkFabrics.some((fabric) =>
+        numericFields.some(
+          (field) =>
+            fabric[field].trim() === "" ||
+            !Number.isFinite(Number(fabric[field])) ||
+            Number(fabric[field]) < 0
+        )
+      )
+    ) {
+      alert(
+        "يرجى إدخال الكمية والسعر لكل قماش بأرقام صحيحة أو عشرية غير سالبة."
+      );
+      return;
+    }
+    setIsSavingBulk(true);
+    try {
+      const rows = bulkFabrics.map((fabric) => ({
+        name: fabric.name.trim(),
+        category,
+        quantity: Number(fabric.quantity),
+        price_per_meter: Number(fabric.price_per_meter),
+        price_per_roll: Number(fabric.price_per_roll),
+      }));
+      const { error } = await supabase.from("products").insert(rows);
+      if (error) throw error;
+      closeModal();
+      await loadProducts();
+    } catch (error) {
+      console.error("Error bulk saving fabrics:", error);
+      alert("حدث خطأ أثناء حفظ الأقمشة. يرجى المحاولة مجدداً.");
+    } finally {
+      setIsSavingBulk(false);
+    }
+  };
 
   const loadProducts = async () => {
     const { data, error } = await supabase
+
       .from("products")
+
       .select("*")
+
       .order("id", { ascending: false });
 
     if (error) {
       console.error("Error fetching products:", error);
+
       alert("حدث خطأ أثناء جلب البيانات.");
+
       return;
     }
 
@@ -67,14 +184,18 @@ export default function Inventory() {
 
     async function loadInitialProducts() {
       const { data, error } = await supabase
+
         .from("products")
+
         .select("*")
+
         .order("id", { ascending: false });
 
       if (cancelled) return;
 
       if (error) {
         console.error("Error fetching products:", error);
+
         alert("حدث خطأ أثناء جلب البيانات.");
       } else {
         setProducts(data ?? []);
@@ -93,13 +214,17 @@ export default function Inventory() {
   const categories = useMemo(
     () =>
       [...new Set(products.map((product) => product.category))]
+
         .filter(Boolean)
+
         .sort(),
+
     [products]
   );
 
   const filteredProducts = useMemo(() => {
     const normalizedName = nameSearch.trim().toLocaleLowerCase();
+
     const normalizedCategory = categorySearch.trim().toLocaleLowerCase();
 
     return products.filter((product) => {
@@ -117,26 +242,38 @@ export default function Inventory() {
 
   const openAddModal = () => {
     setEditingProduct(null);
+
     setFormData(emptyForm);
+    changeFabricCount(1);
+
     setIsModalOpen(true);
   };
 
   const openEditModal = (product: Product) => {
     setEditingProduct(product);
+
     setFormData({
       name: product.name,
+
       category: product.category,
+
       quantity: String(product.quantity),
+
       price_per_meter: String(product.price_per_meter),
+
       price_per_roll: String(product.price_per_roll),
     });
+
     setIsModalOpen(true);
   };
 
   const closeModal = () => {
     setIsModalOpen(false);
+
     setEditingProduct(null);
+
     setFormData(emptyForm);
+    changeFabricCount(1);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -147,35 +284,46 @@ export default function Inventory() {
 
     if (!name.trim() || !category.trim()) {
       alert("يرجى تعبئة اسم القماش والتصنيف.");
+
       return;
     }
 
     const productData = {
       name: name.trim(),
+
       category: category.trim(),
+
       quantity: parseFloat(quantity) || 0,
+
       price_per_meter: parseFloat(price_per_meter) || 0,
+
       price_per_roll: parseFloat(price_per_roll) || 0,
     };
 
     const { error } = editingProduct
       ? await supabase
+
           .from("products")
+
           .update(productData)
+
           .eq("id", editingProduct.id)
       : await supabase.from("products").insert([productData]);
 
     if (error) {
       console.error("Error saving product:", error);
+
       alert(
         editingProduct
           ? "حدث خطأ أثناء تعديل القماش."
           : "حدث خطأ أثناء إضافة القماش."
       );
+
       return;
     }
 
     closeModal();
+
     await loadProducts();
   };
 
@@ -188,7 +336,9 @@ export default function Inventory() {
 
     if (error) {
       console.error("Error deleting product:", error);
+
       alert("حدث خطأ أثناء الحذف.");
+
       return;
     }
 
@@ -197,6 +347,7 @@ export default function Inventory() {
 
   const clearFilters = () => {
     setNameSearch("");
+
     setCategorySearch("");
   };
 
@@ -215,6 +366,7 @@ export default function Inventory() {
             "repeating-linear-gradient(45deg, #C9A227 0, #C9A227 1px, transparent 1px, transparent 12px), repeating-linear-gradient(-45deg, #C9A227 0, #C9A227 1px, transparent 1px, transparent 12px)",
         }}
       />
+
       <div className="absolute top-[-10%] left-[-10%] w-[500px] h-[500px] bg-[#C9A227] opacity-[0.07] rounded-full blur-[120px] pointer-events-none" />
 
       <div className="w-full max-w-6xl z-10 mt-10">
@@ -226,6 +378,7 @@ export default function Inventory() {
             className="flex items-center gap-2 text-[#8C8272] hover:text-[#C9A227] transition-colors"
           >
             <BackIcon />
+
             <span className="text-lg">العودة للرئيسية</span>
           </motion.button>
 
@@ -242,6 +395,7 @@ export default function Inventory() {
 
             <div className="flex items-center justify-end gap-3 mt-2">
               <p className="text-sm text-[#8C8272]">إدارة مخزون أقمشة شاهر</p>
+
               <span className="h-px w-10 bg-[repeating-linear-gradient(90deg,#C9A227_0,#C9A227_3px,transparent_3px,transparent_6px)] opacity-70" />
             </div>
           </motion.div>
@@ -291,6 +445,7 @@ export default function Inventory() {
               className="w-full lg:w-auto flex items-center justify-center gap-2 bg-[#C9A227] hover:bg-[#D9B84A] text-[#171310] font-bold py-3 px-6 rounded-sm transition-all hover:scale-[1.02] active:scale-95 shadow-[0_0_20px_rgba(201,162,39,0.15)]"
             >
               <PlusIcon />
+
               <span>إضافة قماش جديد</span>
             </button>
           </div>
@@ -324,9 +479,11 @@ export default function Inventory() {
                   <th className="py-5 px-6 text-[#C9A227] font-semibold">
                     الرمز
                   </th>
+
                   <th className="py-5 px-6 text-[#C9A227] font-semibold">
                     التصنيف
                   </th>
+
                   <th className="py-5 px-6 text-[#C9A227] font-semibold">
                     اسم القماش
                   </th>
@@ -334,12 +491,15 @@ export default function Inventory() {
                   <th className="py-5 px-6 text-[#C9A227] font-semibold">
                     الكمية (متر)
                   </th>
+
                   <th className="py-5 px-6 text-[#C9A227] font-semibold">
                     السعر (للمتر)
                   </th>
+
                   <th className="py-5 px-6 text-[#C9A227] font-semibold">
                     السعر (للبكرة)
                   </th>
+
                   <th className="py-5 px-6 text-[#C9A227] font-semibold text-center">
                     الإجراءات
                   </th>
@@ -370,11 +530,13 @@ export default function Inventory() {
                       <td className="py-4 px-6 text-[#665D4E] font-mono">
                         #{product.id}
                       </td>
+
                       <td className="py-4 px-6 text-[#8C8272]">
                         <span className="bg-[#221B14] px-3 py-1 rounded-full text-xs border border-[#3A3128]">
                           {product.category}
                         </span>
                       </td>
+
                       <td className="py-4 px-6 text-[#EDE6D6]">
                         {product.name}
                       </td>
@@ -438,7 +600,7 @@ export default function Inventory() {
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9 }}
-              className="bg-[#1C1611] border border-dashed border-[#C9A227]/40 rounded-sm p-8 w-full max-w-md shadow-[0_0_50px_rgba(201,162,39,0.1)] relative"
+              className="bg-[#1C1611] border border-dashed border-[#C9A227]/40 rounded-sm p-8 w-full max-w-3xl max-h-[90vh] overflow-y-auto shadow-[0_0_50px_rgba(201,162,39,0.1)] relative"
             >
               <button
                 onClick={closeModal}
@@ -456,117 +618,238 @@ export default function Inventory() {
 
               <span className="block h-px w-16 bg-[repeating-linear-gradient(90deg,#C9A227_0,#C9A227_3px,transparent_3px,transparent_6px)] opacity-70 mb-6" />
 
-              <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-                <div>
-                  <label className="block text-[#8C8272] text-sm mb-2">
-                    التصنيف
-                  </label>
-                  <input
-                    required
-                    type="text"
-                    list="form-categories"
-                    value={formData.category}
-                    onChange={(e) =>
-                      setFormData({ ...formData, category: e.target.value })
-                    }
-                    className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
-                    placeholder="مثال: أقمشة ستائر"
-                  />
-
-                  <datalist id="form-categories">
-                    {categories.map((category) => (
-                      <option key={category} value={category} />
-                    ))}
-                  </datalist>
-                </div>
-                <div>
-                  <label className="block text-[#8C8272] text-sm mb-2">
-                    اسم القماش
-                  </label>
-                  <input
-                    required
-                    type="text"
-                    value={formData.name}
-                    onChange={(e) =>
-                      setFormData({ ...formData, name: e.target.value })
-                    }
-                    className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
-                    placeholder="مثال: مخمل تركي"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[#8C8272] text-sm mb-2">
-                    الكمية (بالمتر)
-                  </label>
-                  <input
-                    required
-                    type="number"
-                    min="0"
-                    step="0.1"
-                    value={formData.quantity}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        quantity: e.target.value,
-                      })
-                    }
-                    className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
-                    placeholder="0.0"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-[#8C8272] text-sm mb-2">
-                      السعر (للمتر) د.ع
-                    </label>
-                    <input
-                      required
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={formData.price_per_meter}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          price_per_meter: e.target.value,
-                        })
-                      }
-                      className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
-                      placeholder="0"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[#8C8272] text-sm mb-2">
-                      السعر (للبكرة) د.ع
-                    </label>
-                    <input
-                      required
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={formData.price_per_roll}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          price_per_roll: e.target.value,
-                        })
-                      }
-                      className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
-                      placeholder="0"
-                    />
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full bg-[#C9A227] hover:bg-[#D9B84A] text-[#171310] font-bold py-3 rounded-sm mt-4 transition-colors"
+              {!editingProduct && (
+                <form
+                  onSubmit={handleBulkSubmit}
+                  className="flex flex-col gap-5"
                 >
-                  {editingProduct ? "حفظ التعديلات" : "حفظ في المخزون"}
-                </button>
-              </form>
+                  <div>
+                    <label className="block text-[#8C8272] text-sm mb-2">
+                      التصنيف لجميع الأقمشة
+                    </label>
+                    <input
+                      required
+                      type="text"
+                      list="bulk-form-categories"
+                      value={formData.category}
+                      onChange={(e) =>
+                        setFormData({ ...formData, category: e.target.value })
+                      }
+                      className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
+                      placeholder="مثال: أقمشة ستائر"
+                    />
+                    <datalist id="bulk-form-categories">
+                      {categories.map((category) => (
+                        <option key={category} value={category} />
+                      ))}
+                    </datalist>
+                  </div>
+                  <div>
+                    <label className="block text-[#8C8272] text-sm mb-2">
+                      كم عدد أسماء الأقمشة التي تريد إضافتها؟
+                    </label>
+                    <input
+                      required
+                      type="number"
+                      min="1"
+                      max="500"
+                      step="1"
+                      value={fabricCount}
+                      onChange={(e) =>
+                        changeFabricCount(Number(e.target.value))
+                      }
+                      className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
+                    />
+                    <p className="text-xs text-[#8C8272] mt-2">
+                      سيظهر {fabricCount} نموذجاً، ويمكنك إدخال جميع الأقمشة
+                      وحفظها مرة واحدة.
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-4">
+                    {bulkFabrics.map((fabric, index) => (
+                      <div
+                        key={index}
+                        className="border border-dashed border-[#C9A227]/30 bg-[#171310] p-4 rounded-sm"
+                      >
+                        <h3 className="text-[#C9A227] font-bold mb-3">
+                          القماش رقم {index + 1}
+                        </h3>
+                        <label className="block text-[#8C8272] text-sm mb-2">
+                          اسم القماش
+                        </label>
+                        <input
+                          required
+                          type="text"
+                          value={fabric.name}
+                          onChange={(e) =>
+                            updateBulkFabric(index, "name", e.target.value)
+                          }
+                          placeholder="مثال: مخمل تركي"
+                          className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 mb-3 focus:outline-none focus:border-[#C9A227]"
+                        />
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          {(
+                            [
+                              ["quantity", "الكمية (بالمتر)"],
+                              ["price_per_meter", "السعر (للمتر) د.ع"],
+                              ["price_per_roll", "السعر (للبكرة) د.ع"],
+                            ] as const
+                          ).map(([field, label]) => (
+                            <div key={field}>
+                              <label className="block text-[#8C8272] text-sm mb-2">
+                                {label}
+                              </label>
+                              <input
+                                required
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={fabric[field]}
+                                onChange={(e) =>
+                                  updateBulkFabric(index, field, e.target.value)
+                                }
+                                placeholder="0"
+                                className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isSavingBulk}
+                    className="w-full bg-[#C9A227] hover:bg-[#D9B84A] disabled:opacity-50 text-[#171310] font-bold py-3 rounded-sm mt-2 transition-colors"
+                  >
+                    {isSavingBulk
+                      ? "جاري حفظ الأقمشة..."
+                      : `حفظ ${fabricCount} قماش في المخزون`}
+                  </button>
+                </form>
+              )}
+              {editingProduct && (
+                <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+                  <div>
+                    <label className="block text-[#8C8272] text-sm mb-2">
+                      التصنيف
+                    </label>
+
+                    <input
+                      required
+                      type="text"
+                      list="form-categories"
+                      value={formData.category}
+                      onChange={(e) =>
+                        setFormData({ ...formData, category: e.target.value })
+                      }
+                      className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
+                      placeholder="مثال: أقمشة ستائر"
+                    />
+
+                    <datalist id="form-categories">
+                      {categories.map((category) => (
+                        <option key={category} value={category} />
+                      ))}
+                    </datalist>
+                  </div>
+
+                  <div>
+                    <label className="block text-[#8C8272] text-sm mb-2">
+                      اسم القماش
+                    </label>
+
+                    <input
+                      required
+                      type="text"
+                      value={formData.name}
+                      onChange={(e) =>
+                        setFormData({ ...formData, name: e.target.value })
+                      }
+                      className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
+                      placeholder="مثال: مخمل تركي"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[#8C8272] text-sm mb-2">
+                      الكمية (بالمتر)
+                    </label>
+
+                    <input
+                      required
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={formData.quantity}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+
+                          quantity: e.target.value,
+                        })
+                      }
+                      className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
+                      placeholder="0.0"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[#8C8272] text-sm mb-2">
+                        السعر (للمتر) د.ع
+                      </label>
+
+                      <input
+                        required
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={formData.price_per_meter}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+
+                            price_per_meter: e.target.value,
+                          })
+                        }
+                        className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
+                        placeholder="0"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[#8C8272] text-sm mb-2">
+                        السعر (للبكرة) د.ع
+                      </label>
+
+                      <input
+                        required
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={formData.price_per_roll}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+
+                            price_per_roll: e.target.value,
+                          })
+                        }
+                        className="w-full bg-[#0E0B08] border border-[#3A3128] text-white rounded-sm py-3 px-4 focus:outline-none focus:border-[#C9A227]"
+                        placeholder="0"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full bg-[#C9A227] hover:bg-[#D9B84A] text-[#171310] font-bold py-3 rounded-sm mt-4 transition-colors"
+                  >
+                    {editingProduct ? "حفظ التعديلات" : "حفظ في المخزون"}
+                  </button>
+                </form>
+              )}
             </motion.div>
           </div>
         )}
@@ -587,6 +870,7 @@ const SearchIcon = () => (
     strokeLinejoin="round"
   >
     <circle cx="11" cy="11" r="8" />
+
     <path d="m21 21-4.3-4.3" />
   </svg>
 );
@@ -603,8 +887,11 @@ const CategoryIcon = () => (
     strokeLinejoin="round"
   >
     <path d="M3 7V5a2 2 0 0 1 2-2h2l10 10-4 4L3 7Z" />
+
     <path d="M7 7h.01" />
+
     <path d="m13 19 6-6" />
+
     <path d="m16 16 3 3" />
   </svg>
 );
@@ -621,6 +908,7 @@ const PlusIcon = () => (
     strokeLinejoin="round"
   >
     <path d="M5 12h14" />
+
     <path d="M12 5v14" />
   </svg>
 );
@@ -652,6 +940,7 @@ const EditIcon = () => (
     strokeLinejoin="round"
   >
     <path d="M12 20h9" />
+
     <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
   </svg>
 );
@@ -668,7 +957,9 @@ const DeleteIcon = () => (
     strokeLinejoin="round"
   >
     <path d="M3 6h18" />
+
     <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+
     <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
   </svg>
 );
@@ -685,6 +976,7 @@ const CloseIcon = () => (
     strokeLinejoin="round"
   >
     <path d="M18 6 6 18" />
+
     <path d="m6 6 12 12" />
   </svg>
 );

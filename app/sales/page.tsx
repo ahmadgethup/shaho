@@ -2029,8 +2029,8 @@ export default function Sales() {
                       >
                         {invoiceSettings.shop_name}
                       </h2>
-                      <p className="text-sm text-[#6b5a46] mt-2">
-                        فاتورة مبيعات
+                      <p className="text-sm text-[#000000] mt-2">
+                        وصل مبيعات
                         {receipt.paymentType === "credit"
                           ? " (دين)"
                           : receipt.paymentType === "mixed"
@@ -2041,7 +2041,7 @@ export default function Sales() {
                       {(invoiceSettings.phone_1 ||
                         invoiceSettings.phone_2 ||
                         invoiceSettings.address) && (
-                        <div className="text-xs text-[#6b5a46] mt-3 flex flex-col gap-1">
+                        <div className="text-xs text-[#000000] mt-3 flex flex-col gap-1">
                           {(invoiceSettings.phone_1 ||
                             invoiceSettings.phone_2) && (
                             <p dir="ltr" className="font-mono">
@@ -2062,12 +2062,12 @@ export default function Sales() {
 
                     <div className="flex justify-between gap-4 text-sm mb-5">
                       <div>
-                        <p className="text-[#6b5a46]">رقم الفاتورة</p>
+                        <p className="text-[#000000]">رقم وصل</p>
                         <p className="font-bold">{receipt.invoiceNumber}</p>
                       </div>
 
                       <div className="text-left">
-                        <p className="text-[#6b5a46]">التاريخ والوقت</p>
+                        <p className="text-[#000000]">التاريخ والوقت</p>
                         <p className="font-bold">
                           {new Date(receipt.createdAt).toLocaleString("ar-IQ", {
                             year: "numeric",
@@ -2082,7 +2082,7 @@ export default function Sales() {
 
                     {(receipt.customerName || receipt.loanName) && (
                       <div className="text-sm mb-5">
-                        <p className="text-[#6b5a46]">
+                        <p className="text-[#000000]">
                           {receipt.paymentType === "credit"
                             ? "الزبون (دين مسجَّل على دفتر الديون)"
                             : receipt.paymentType === "mixed"
@@ -2100,14 +2100,14 @@ export default function Sales() {
                       style={{ borderColor: invoiceSettings.accent_color }}
                     >
                       <div
-                        className="grid grid-cols-[1fr_auto_auto] gap-3 text-xs text-[#6b5a46] pb-3 border-b border-dashed"
+                        className="grid grid-cols-[1fr_auto_auto] gap-3 text-xs text-[#000000] pb-3 border-b border-dashed"
                         style={{
                           borderColor: `${invoiceSettings.accent_color}99`,
                         }}
                       >
                         <span>القماش</span>
-                        <span>الكمية</span>
-                        <span>السعر</span>
+                        <span>الكمية ---</span>
+                        <span> ---السعر</span>
                       </div>
 
                       <div className="space-y-3 pt-3">
@@ -2118,7 +2118,7 @@ export default function Sales() {
                           >
                             <div>
                               <p className="font-bold">{item.product.name}</p>
-                              <p className="text-xs text-[#6b5a46]">
+                              <p className="text-xs text-[#000000]">
                                 {item.product.category}
                                 {" — "}
                                 {item.saleType === "meter"
@@ -2137,8 +2137,9 @@ export default function Sales() {
                       </div>
                     </div>
 
-                    <div className="space-y-3 mt-5 text-sm">
+                    <div className="space-y-3 mt-5 text-sm text-[#000000]">
                       <ReceiptRow
+                        valueClassName="text-[#000000]"
                         label="الإجمالي قبل الخصم"
                         value={formatIqd(receipt.originalTotal)}
                       />
@@ -2185,7 +2186,7 @@ export default function Sales() {
                       </div>
                     </div>
 
-                    <p className="text-center text-xs text-[#6b5a46] mt-7">
+                    <p className="text-center text-xs text-[#000000] mt-7">
                       شكراً لتسوقكم معنا
                     </p>
                   </div>
