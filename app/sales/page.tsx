@@ -411,13 +411,15 @@ export default function Sales() {
 
     const soldQuantity = parseFloat(quantity) || 0;
 
-    const unitPrice =
-      saleType === "meter"
-        ? selectedProduct.price_per_meter
-        : selectedProduct.price_per_roll;
+    if (saleType === "roll") {
+      const rollSize = parseFloat(rollSizeMeters) || 0;
+      return (
+        soldQuantity * rollSize * Number(selectedProduct.price_per_roll || 0)
+      );
+    }
 
-    return soldQuantity * unitPrice;
-  }, [selectedProduct, quantity, saleType]);
+    return soldQuantity * Number(selectedProduct.price_per_meter || 0);
+  }, [selectedProduct, quantity, saleType, rollSizeMeters]);
 
   const itemMetersToDeduct = useMemo(() => {
     const soldQuantity = parseFloat(quantity) || 0;
