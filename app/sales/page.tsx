@@ -18,6 +18,29 @@ const arefRuqaa = Aref_Ruqaa({
   weight: ["400", "700"],
 });
 
+interface ExpenseForSummary {
+  id: number;
+  amount: number;
+  created_at: string;
+}
+
+async function getAllExpensesForSummary(): Promise<ExpenseForSummary[]> {
+  const all: ExpenseForSummary[] = [];
+  const pageSize = 1000;
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from("expenses")
+      .select("id, amount, created_at")
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    const page = (data ?? []) as ExpenseForSummary[];
+    all.push(...page);
+    if (page.length < pageSize) return all;
+  }
+}
+
 interface Product {
   id: number;
   name: string;
@@ -49,10 +72,13 @@ type PaymentType = "cash" | "credit" | "mixed";
 interface Sale {
   id: number;
   product_id: number;
+  customer_id: string | null;
+  invoice_number: string | null;
   product_name: string;
   quantity_sold: number;
   sale_type: "meter" | "roll";
   stock_quantity_deducted: number | null;
+  roll_size_meters: number | null;
   original_total_price: number;
   actual_total_price: number;
   discount_amount: number;
@@ -204,7 +230,7 @@ async function getDashboardData(): Promise<{
       supabase
         .from("sales")
         .select(
-          "id, product_id, product_name, quantity_sold, sale_type, stock_quantity_deducted, original_total_price, actual_total_price, discount_amount, payment_type, loan_id, cash_amount, credit_amount, created_at"
+          "id, product_id, customer_id, invoice_number, product_name, quantity_sold, sale_type, stock_quantity_deducted, roll_size_meters, original_total_price, actual_total_price, discount_amount, payment_type, loan_id, cash_amount, credit_amount, created_at"
         )
         .order("created_at", { ascending: false }),
 
@@ -236,6 +262,16 @@ export default function Sales() {
 
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
+  const [summaryExpenses, setSummaryExpenses] = useState<ExpenseForSummary[]>(
+    []
+  );
+  const [expensesSummaryError, setExpensesSummaryError] = useState(false);
+  const [expensesSummaryLoading, setExpensesSummaryLoading] = useState(true);
+  const [showSalesStatistics, setShowSalesStatistics] = useState(false);
+  const [currentDayKey, setCurrentDayKey] = useState(() =>
+    getLocalDateString(new Date())
+  );
+
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loans, setLoans] = useState<LoanOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -279,6 +315,12 @@ export default function Sales() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [deletingSaleId, setDeletingSaleId] = useState<number | null>(null);
+  const [expandedInvoices, setExpandedInvoices] = useState<string[]>([]);
+  const [editingSale, setEditingSale] = useState<Sale | null>(null);
+  const [editMeters, setEditMeters] = useState("");
+  const [editPrice, setEditPrice] = useState("");
+  const [editManualPrice, setEditManualPrice] = useState(false);
+  const [savingSale, setSavingSale] = useState(false);
 
   const receiptRef = useRef<HTMLDivElement>(null);
   const [receipt, setReceipt] = useState<ReceiptData | null>(null);
@@ -472,6 +514,60 @@ export default function Sales() {
     [totalAmountNumber, creditAmountValue]
   );
 
+  // Refresh expenses when returning from the expenses page, and when the
+  // calendar day changes while this page remains open.
+  useEffect(() => {
+    let active = true;
+    const loadExpenses = async () => {
+      try {
+        const rows = await getAllExpensesForSummary();
+        if (!active) return;
+        setSummaryExpenses(rows);
+        setExpensesSummaryError(false);
+      } catch (error) {
+        console.error("Error fetching expenses for sales summary:", error);
+        if (active) setExpensesSummaryError(true);
+      } finally {
+        if (active) setExpensesSummaryLoading(false);
+      }
+    };
+    void loadExpenses();
+    const onFocus = () => {
+      void loadExpenses();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void loadExpenses();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    const timer = window.setInterval(() => {
+      const today = getLocalDateString(new Date());
+      setCurrentDayKey(today);
+      void loadExpenses();
+    }, 60_000);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const expensesForSelectedPeriod = useMemo(() => {
+    const now = new Date();
+    return summaryExpenses.reduce((total, expense) => {
+      const date = new Date(expense.created_at);
+      const matches =
+        filterPeriod === "day"
+          ? getLocalDateString(date) === selectedDate
+          : filterPeriod === "month"
+          ? date.getMonth() === now.getMonth() &&
+            date.getFullYear() === now.getFullYear()
+          : date.getFullYear() === now.getFullYear();
+      return total + (matches ? Number(expense.amount || 0) : 0);
+    }, 0);
+  }, [summaryExpenses, filterPeriod, selectedDate, currentDayKey]);
+
   const filteredSales = useMemo(() => {
     const now = new Date();
 
@@ -492,6 +588,79 @@ export default function Sales() {
       return saleDate.getFullYear() === now.getFullYear();
     });
   }, [sales, filterPeriod, selectedDate]);
+
+  const groupedInvoices = useMemo(() => {
+    const groups = new Map<string, Sale[]>();
+    for (const sale of filteredSales) {
+      // Older rows without an invoice number are NEVER grouped together.
+      const key = sale.invoice_number || `legacy-${sale.id}`;
+      groups.set(key, [...(groups.get(key) || []), sale]);
+    }
+    return Array.from(groups.entries()).map(([key, items]) => ({
+      key,
+      items,
+      date: items[0].created_at,
+      total: items.reduce((n, x) => n + Number(x.actual_total_price || 0), 0),
+      customer:
+        items[0].loan_id != null
+          ? loans.find((x) => x.id === items[0].loan_id)?.shop_name ||
+            "زبون دين"
+          : customers.find((x) => x.id === items[0].customer_id)?.shop_name ||
+            "زبون نقدي",
+    }));
+  }, [filteredSales, customers, loans]);
+
+  const openEditSale = (sale: Sale) => {
+    setEditingSale(sale);
+    setEditMeters(String(sale.stock_quantity_deducted ?? sale.quantity_sold));
+    setEditPrice(String(sale.actual_total_price));
+    setEditManualPrice(false);
+  };
+
+  const editCalculatedPrice = editingSale
+    ? Number(editMeters || 0) *
+      (Number(editingSale.stock_quantity_deducted || 0) > 0
+        ? Number(editingSale.original_total_price) /
+          Number(editingSale.stock_quantity_deducted)
+        : 0)
+    : 0;
+
+  const saveEditedSale = async () => {
+    if (!editingSale) return;
+    const meters = Number(editMeters);
+    const price = editManualPrice
+      ? Number(editPrice)
+      : Math.round(editCalculatedPrice * 100) / 100;
+    if (
+      !Number.isFinite(meters) ||
+      meters <= 0 ||
+      !Number.isFinite(price) ||
+      price < 0 ||
+      editPrice.trim() === ""
+    ) {
+      alert("أدخل أمتاراً وسعراً صحيحين.");
+      return;
+    }
+    setSavingSale(true);
+    try {
+      const { error } = await supabase.rpc("update_sale_item_meters", {
+        p_sale_id: editingSale.id,
+        p_new_meters: meters,
+        p_new_price: price,
+      });
+      if (error) throw error;
+      await refreshData();
+      setEditingSale(null);
+    } catch (error) {
+      alert(
+        `تعذر تعديل المبيعة: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    } finally {
+      setSavingSale(false);
+    }
+  };
 
   const summary = useMemo(
     () =>
@@ -1667,43 +1836,104 @@ export default function Sales() {
               )}
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-              <SummaryCard
-                title="إجمالي الإيرادات"
-                value={formatIqd(summary.totalRevenue)}
-                color="text-white"
-              />
+            <button
+              type="button"
+              onClick={() => setShowSalesStatistics(true)}
+              className="w-full flex items-center justify-between gap-3 bg-[#1C1611] border border-dashed border-[#C9A227]/40 rounded-sm px-5 py-4 text-[#C9A227] hover:bg-[#2A2117] transition-colors font-bold"
+            >
+              <span>عرض الإحصائيات والأرقام المالية</span>
+              <span aria-hidden="true">←</span>
+            </button>
 
-              <SummaryCard
-                title="الأمتار المباعة"
-                value={`${summary.totalMeters.toLocaleString("en-IQ")} متر`}
-                color="text-[#EDE6D6]"
-              />
+            {showSalesStatistics && (
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="إحصائيات المبيعات"
+                className="fixed inset-0 z-[100] bg-[#171310] text-white overflow-y-auto"
+                dir="rtl"
+              >
+                <div className="max-w-6xl mx-auto px-5 py-8">
+                  <div className="flex items-center justify-between gap-4 mb-8">
+                    <div>
+                      <h2 className="text-2xl font-bold text-[#C9A227]">
+                        إحصائيات المبيعات
+                      </h2>
+                      <p className="text-[#8C8272] mt-2 text-sm">
+                        {filterPeriod === "day"
+                          ? `إحصائيات يوم ${selectedDate}`
+                          : filterPeriod === "month"
+                          ? "إحصائيات الشهر المحدد في شاشة المبيعات"
+                          : "إحصائيات السنة المحددة في شاشة المبيعات"}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowSalesStatistics(false)}
+                      className="bg-[#C9A227] text-[#171310] font-bold px-5 py-3 rounded-sm hover:bg-[#D9B84A]"
+                    >
+                      رجوع للمبيعات
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+                    <SummaryCard
+                      title="إجمالي الإيرادات بعد خصم المصروفات"
+                      value={
+                        expensesSummaryLoading || expensesSummaryError
+                          ? "غير متاح"
+                          : formatIqd(
+                              summary.totalRevenue - expensesForSelectedPeriod
+                            )
+                      }
+                      color="text-white"
+                    />
 
-              <SummaryCard
-                title="مبيعات نقدية"
-                value={formatIqd(summary.totalCash)}
-                color="text-[#8FB08A]"
-              />
+                    <SummaryCard
+                      title="الأمتار المباعة"
+                      value={`${summary.totalMeters.toLocaleString(
+                        "en-IQ"
+                      )} متر`}
+                      color="text-[#EDE6D6]"
+                    />
 
-              <SummaryCard
-                title="مبيعات بالدين"
-                value={formatIqd(summary.totalCredit)}
-                color="text-[#E08A78]"
-              />
+                    <SummaryCard
+                      title="مبيعات نقدية"
+                      value={formatIqd(summary.totalCash)}
+                      color="text-[#8FB08A]"
+                    />
 
-              <SummaryCard
-                title="إجمالي الخصومات"
-                value={formatIqd(summary.totalDiscount)}
-                color="text-[#E08A78]"
-              />
+                    <SummaryCard
+                      title="مبيعات بالدين"
+                      value={formatIqd(summary.totalCredit)}
+                      color="text-[#E08A78]"
+                    />
 
-              <SummaryCard
-                title="عدد عمليات البيع"
-                value={`${summary.totalItems} عملية`}
-                color="text-[#7FA3C2]"
-              />
-            </div>
+                    <SummaryCard
+                      title="إجمالي الخصومات"
+                      value={formatIqd(summary.totalDiscount)}
+                      color="text-[#E08A78]"
+                    />
+
+                    <SummaryCard
+                      title="عدد عمليات البيع"
+                      value={`${groupedInvoices.length} عملية`}
+                      color="text-[#7FA3C2]"
+                    />
+                  </div>
+                  <p className="text-sm text-[#8C8272] mb-5">
+                    {expensesSummaryLoading
+                      ? "جاري تحميل المصروفات لحساب الإيرادات بعد الخصم..."
+                      : expensesSummaryError
+                      ? "تعذّر جلب المصروفات؛ لم يتم عرض إيرادات صافية غير دقيقة."
+                      : `إجمالي المبيعات قبل المصروفات: ${formatIqd(
+                          summary.totalRevenue
+                        )} — مصروفات الفترة المحددة: ${formatIqd(
+                          expensesForSelectedPeriod
+                        )}. الإيرادات المعروضة أعلاه بعد خصم هذه المصروفات، وتشمل المبيعات بالدين وليست النقد المقبوض فقط.`}
+                  </p>
+                </div>
+              </div>
+            )}
 
             <div className="bg-[#1C1611] border border-dashed border-[#C9A227]/25 rounded-sm p-6 shadow-2xl">
               <h3 className="text-xl font-bold text-[#EDE6D6] mb-6 border-b border-dashed border-[#3A3128] pb-4">
@@ -1719,133 +1949,180 @@ export default function Sales() {
                 )
               </h3>
 
-              <div className="overflow-x-auto">
-                <table className="w-full text-right border-collapse">
-                  <thead>
-                    <tr className="text-[#8C8272] border-b border-dashed border-[#3A3128]">
-                      <th className="py-3 px-4 font-normal">التاريخ والوقت</th>
-                      <th className="py-3 px-4 font-normal">القماش</th>
-                      <th className="py-3 px-4 font-normal">الكمية</th>
-                      <th className="py-3 px-4 font-normal">السعر النهائي</th>
-                      <th className="py-3 px-4 font-normal text-center">
-                        طريقة الدفع
-                      </th>
-                      <th className="py-3 px-4 font-normal text-center">
-                        الخصم
-                      </th>
-                      <th className="py-3 px-4 font-normal text-center">
-                        إجراء
-                      </th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {loading ? (
-                      <tr>
-                        <td
-                          colSpan={7}
-                          className="py-12 text-center text-[#C9A227]"
+              <div className="space-y-3">
+                {loading ? (
+                  <p className="py-10 text-center text-[#C9A227]">
+                    جاري تحميل المبيعات...
+                  </p>
+                ) : groupedInvoices.length === 0 ? (
+                  <p className="py-10 text-center text-[#8C8272]">
+                    لا توجد مبيعات في هذه الفترة.
+                  </p>
+                ) : (
+                  groupedInvoices.map((invoice) => {
+                    const expanded = expandedInvoices.includes(invoice.key);
+                    return (
+                      <div
+                        key={invoice.key}
+                        className="border border-[#3A3128] bg-[#221B14] rounded-sm overflow-hidden"
+                      >
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedInvoices((old) =>
+                              expanded
+                                ? old.filter((k) => k !== invoice.key)
+                                : [...old, invoice.key]
+                            )
+                          }
+                          className="w-full text-right p-4 flex items-center justify-between gap-3 hover:bg-[#2C2319]"
                         >
-                          جاري تحميل المبيعات...
-                        </td>
-                      </tr>
-                    ) : filteredSales.length > 0 ? (
-                      filteredSales.map((sale) => (
-                        <tr
-                          key={sale.id}
-                          className="border-b border-dashed border-[#3A3128] hover:bg-[#221B14] transition-colors"
-                        >
-                          <td className="py-4 px-4 text-sm text-[#8C8272] whitespace-nowrap">
-                            {new Date(sale.created_at).toLocaleString("ar-IQ", {
-                              year: "numeric",
-                              month: "2-digit",
-                              day: "2-digit",
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })}
-                          </td>
-
-                          <td className="py-4 px-4 font-medium text-[#C9A227]">
-                            {sale.product_name}
-                          </td>
-
-                          <td className="py-4 px-4 text-[#B3A990]">
-                            {sale.quantity_sold}{" "}
-                            <span className="text-xs text-[#665D4E]">
-                              {sale.sale_type === "meter" ? "متر" : "بكرة"}
+                          <div>
+                            <div className="font-bold text-[#EDE6D6]">
+                              {invoice.customer}
+                            </div>
+                            <div className="text-xs text-[#8C8272] mt-1">
+                              {new Date(invoice.date).toLocaleString("ar-IQ")}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="text-[#C9A227] font-bold">
+                              {formatIqd(invoice.total)}
                             </span>
-                          </td>
-
-                          <td className="py-4 px-4 font-mono text-white">
-                            {formatIqd(sale.actual_total_price)}
-                          </td>
-
-                          <td className="py-4 px-4 text-center">
-                            {sale.payment_type === "credit" ? (
-                              <span className="bg-[#C1523F]/10 text-[#E08A78] px-3 py-1 rounded-full text-xs border border-[#C1523F]/20 whitespace-nowrap">
-                                دين
-                                {getLoanNameForSale(sale.loan_id)
-                                  ? ` — ${getLoanNameForSale(sale.loan_id)}`
-                                  : ""}
-                              </span>
-                            ) : sale.payment_type === "mixed" ? (
-                              <span className="bg-[#7FA3C2]/10 text-[#7FA3C2] px-3 py-1 rounded-full text-xs border border-[#7FA3C2]/20 whitespace-nowrap">
-                                مختلط
-                                {getLoanNameForSale(sale.loan_id)
-                                  ? ` — ${getLoanNameForSale(sale.loan_id)}`
-                                  : ""}
-                                {sale.credit_amount != null
-                                  ? ` (دين: ${formatIqd(sale.credit_amount)})`
-                                  : ""}
-                              </span>
-                            ) : (
-                              <span className="bg-[#4C6B4F]/10 text-[#8FB08A] px-3 py-1 rounded-full text-xs border border-[#4C6B4F]/20">
-                                نقد
-                              </span>
-                            )}
-                          </td>
-
-                          <td className="py-4 px-4 text-center">
-                            {sale.discount_amount > 0 ? (
-                              <span className="bg-[#C1523F]/10 text-[#E08A78] px-3 py-1 rounded-full text-xs border border-[#C1523F]/20 font-mono">
-                                {formatIqd(sale.discount_amount)}
-                              </span>
-                            ) : (
-                              <span className="text-[#4A4335]">-</span>
-                            )}
-                          </td>
-
-                          <td className="py-4 px-4 text-center">
-                            <button
-                              type="button"
-                              onClick={() => void deleteSale(sale)}
-                              disabled={deletingSaleId === sale.id}
-                              className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50"
-                            >
-                              {deletingSaleId === sale.id
-                                ? "جارٍ الحذف..."
-                                : "حذف وإرجاع للمخزون"}
-                            </button>
-                          </td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td
-                          colSpan={7}
-                          className="py-12 text-center text-[#665D4E]"
-                        >
-                          لا توجد مبيعات في هذه الفترة.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                            <span>{expanded ? "▲" : "▼"}</span>
+                          </div>
+                        </button>
+                        {expanded && (
+                          <div className="border-t border-[#3A3128] p-3 space-y-3">
+                            {invoice.items.map((sale) => (
+                              <div
+                                key={sale.id}
+                                className="p-3 border border-[#3A3128] rounded-sm flex flex-wrap justify-between items-center gap-3"
+                              >
+                                <div>
+                                  <div className="font-bold text-[#C9A227]">
+                                    {sale.product_name}
+                                  </div>
+                                  <div className="text-xs text-[#8C8272] mt-1">
+                                    {sale.sale_type === "roll"
+                                      ? `${sale.quantity_sold} رول`
+                                      : `${sale.quantity_sold} متر`}{" "}
+                                    · المجموع{" "}
+                                    {sale.stock_quantity_deducted ??
+                                      "غير معروف"}{" "}
+                                    متر
+                                  </div>
+                                  <div className="text-sm mt-1">
+                                    {formatIqd(sale.actual_total_price)}
+                                  </div>
+                                </div>
+                                <div className="flex gap-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditSale(sale)}
+                                    className="px-3 py-2 bg-[#C9A227] text-[#171310] font-bold rounded-sm"
+                                  >
+                                    تعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void deleteSale(sale)}
+                                    disabled={deletingSaleId === sale.id}
+                                    className="text-red-400 disabled:opacity-50"
+                                  >
+                                    {deletingSaleId === sale.id
+                                      ? "جارٍ الحذف"
+                                      : "حذف"}
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
           </motion.div>
         </div>
       </main>
+
+      <AnimatePresence>
+        {editingSale && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-4"
+            dir="rtl"
+          >
+            <div
+              className={`${cairo.className} w-full max-w-md bg-[#1C1611] border border-[#C9A227]/40 p-6 rounded-sm text-white space-y-4`}
+            >
+              <h2 className="text-xl font-bold text-[#C9A227]">
+                تعديل {editingSale.product_name}
+              </h2>
+              <label className="block">
+                الأمتار الإجمالية
+                <input
+                  type="number"
+                  min="0.01"
+                  step="any"
+                  value={editMeters}
+                  onChange={(e) => {
+                    setEditMeters(e.target.value);
+                    setEditManualPrice(false);
+                  }}
+                  className="block mt-2 w-full p-3 bg-[#0E0B08] border border-[#3A3128]"
+                />
+              </label>
+              <div className="text-sm text-[#8C8272]">
+                السعر المحسوب: {formatIqd(editCalculatedPrice)}
+              </div>
+              <label className="block">
+                السعر النهائي (يمكن تخفيضه يدوياً)
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={
+                    editManualPrice
+                      ? editPrice
+                      : String(Math.round(editCalculatedPrice * 100) / 100)
+                  }
+                  onChange={(e) => {
+                    setEditPrice(e.target.value);
+                    setEditManualPrice(true);
+                  }}
+                  className="block mt-2 w-full p-3 bg-[#0E0B08] border border-[#3A3128]"
+                />
+              </label>
+              <p className="text-xs text-[#8C8272]">
+                في الرول يتم تعديل مجموع الأمتار مع بقاء عدد الرولات كما هو.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  disabled={savingSale}
+                  onClick={() => void saveEditedSale()}
+                  className="flex-1 p-3 bg-[#C9A227] text-[#171310] font-bold disabled:opacity-50"
+                >
+                  {savingSale ? "جارٍ الحفظ..." : "حفظ التعديل"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingSale(null)}
+                  className="flex-1 border border-[#3A3128] p-3"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Invoice / shop info settings modal */}
       <AnimatePresence>

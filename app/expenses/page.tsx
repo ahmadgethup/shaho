@@ -37,10 +37,24 @@ async function getExpenses(): Promise<Expense[]> {
   return (data ?? []) as Expense[];
 }
 
+// تاريخ المحل حسب توقيت العراق، وليس توقيت خادم قاعدة البيانات.
+const iraqDayKey = (date: Date) => {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Baghdad",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const value = (type: string) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+};
+
 export default function Expenses() {
   const router = useRouter();
 
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [todayKey, setTodayKey] = useState(() => iraqDayKey(new Date()));
   const [loading, setLoading] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -81,6 +95,19 @@ export default function Expenses() {
 
     return () => {
       isMounted = false;
+    };
+  }, []);
+
+  // عند منتصف الليل بتوقيت بغداد يتصفّر مجموع اليوم تلقائياً.
+  // يعمل أيضاً عند فتح الصفحة بعد أن كان اللابتوب مغلقاً.
+  useEffect(() => {
+    const syncDay = () => setTodayKey(iraqDayKey(new Date()));
+    syncDay();
+    const timer = window.setInterval(syncDay, 10000);
+    window.addEventListener("focus", syncDay);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", syncDay);
     };
   }, []);
 
@@ -143,10 +170,27 @@ export default function Expenses() {
     await refreshExpenses();
   };
 
-  const totalExpenses = expenses.reduce(
+  const todayExpenses = expenses.filter(
+    (expense) => iraqDayKey(new Date(expense.created_at)) === todayKey
+  );
+  const todayTotal = todayExpenses.reduce(
     (total, expense) => total + Number(expense.amount || 0),
     0
   );
+  const dailyHistory = Object.entries(
+    expenses.reduce<Record<string, { total: number; count: number }>>(
+      (days, expense) => {
+        const day = iraqDayKey(new Date(expense.created_at));
+        if (day !== todayKey) {
+          if (!days[day]) days[day] = { total: 0, count: 0 };
+          days[day].total += Number(expense.amount || 0);
+          days[day].count += 1;
+        }
+        return days;
+      },
+      {}
+    )
+  ).sort(([a], [b]) => b.localeCompare(a));
 
   return (
     <main
@@ -196,19 +240,19 @@ export default function Expenses() {
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
           <div className="md:col-span-2 bg-[#1C1611] border border-dashed border-[#3A3128] rounded-sm p-5">
-            <p className="text-[#8C8272] text-sm">عدد المصروفات المسجلة</p>
+            <p className="text-[#8C8272] text-sm">عدد مصروفات اليوم</p>
             <p className="text-3xl font-bold text-white mt-2">
-              {expenses.length}
+              {todayExpenses.length}
             </p>
           </div>
 
           <div className="bg-[#1C1611] border border-dashed border-[#3E5C76]/50 rounded-sm p-5">
             <div className="flex items-center gap-2">
               <span className="h-2 w-2 rounded-full bg-[#3E5C76]" />
-              <p className="text-[#8C8272] text-sm">إجمالي المصروفات</p>
+              <p className="text-[#8C8272] text-sm">مصروفات اليوم</p>
             </div>
             <p className="text-2xl font-bold text-[#7FA3C2] mt-2 font-mono">
-              {totalExpenses.toLocaleString("en-IQ")} د.ع
+              {todayTotal.toLocaleString("en-IQ")} د.ع
             </p>
           </div>
         </div>
@@ -303,6 +347,38 @@ export default function Expenses() {
             </form>
           </motion.div>
 
+          <section className="bg-[#1C1611] border border-dashed border-[#C9A227]/25 rounded-sm p-6">
+            <h3 className="text-xl font-bold text-[#EDE6D6] mb-2">
+              سجل المجاميع اليومية
+            </h3>
+            <p className="text-sm text-[#8C8272] mb-5">
+              تُحفظ مصروفات كل يوم تلقائياً، ويبدأ مجموع جديد من الصفر عند منتصف
+              الليل بتوقيت العراق.
+            </p>
+            {dailyHistory.length === 0 ? (
+              <p className="text-[#8C8272]">لا توجد أيام سابقة بعد.</p>
+            ) : (
+              <div className="space-y-2 max-h-80 overflow-y-auto">
+                {dailyHistory.map(([day, data]) => (
+                  <div
+                    key={day}
+                    className="flex justify-between items-center gap-4 bg-[#0E0B08] border border-[#3A3128] rounded-sm px-4 py-3"
+                  >
+                    <div>
+                      <p className="text-[#EDE6D6] font-bold">{day}</p>
+                      <p className="text-[#8C8272] text-xs">
+                        {data.count} مصروف
+                      </p>
+                    </div>
+                    <p className="font-mono font-bold text-[#7FA3C2] whitespace-nowrap">
+                      {data.total.toLocaleString("en-IQ")} د.ع
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -310,7 +386,7 @@ export default function Expenses() {
             className="bg-[#1C1611] border border-dashed border-[#C9A227]/25 rounded-sm p-6 shadow-2xl"
           >
             <h3 className="text-xl font-bold text-[#EDE6D6] mb-6 border-b border-dashed border-[#3A3128] pb-4">
-              سجل المصروفات
+              سجل جميع المصروفات (التفاصيل)
             </h3>
 
             <div className="overflow-x-auto">
